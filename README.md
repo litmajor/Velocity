@@ -72,6 +72,14 @@ The `proof` object contains intermediate values (`hex`, `modInt`, `r`, `baseCras
 ## License
 This project is released under the MIT License — see `LICENSE`.
 
+## Architecture: Surface-State Architecture (SSA)
+
+This repository follows the Surface-State Architecture (SSA) principles. See the full SSA specification for rationale, layers, and patterns:
+
+- [Surface-State Architecture (SSA)](SSA.md)
+
+This project is released under the MIT License — see `LICENSE`.
+
 ## What this project demonstrates
 
 - A deterministic commit-reveal RNG pattern suitable for provably-fair games.
