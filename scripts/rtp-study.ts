@@ -1,34 +1,22 @@
 /**
- * Monte-Carlo RTP / house-edge study (audit item U-1).
+ * Monte-Carlo RTP / house-edge study (audit items U-1 / E-1).
  *
  * Uses the exact production derivation (recomputeCrashPoint — the same pure
  * function the outside verifier uses) over deterministic pseudo-random seeds,
  * for every combination of shaping preset, volatility system state, player
- * mix, and elasticity bound.
+ * mix, and elasticity bound. Reports empirical RTP with a 3σ half-width and
+ * the closed-form theoretical RTP of the committed EdgeProfile distribution.
  *
  * RTP for an auto-cashout-at-m strategy = m × P(crash ≥ m).
- * House edge = 1 − RTP.
+ * House edge = 1 − RTP. Economic contract: RTP(m) ∈ [(1-h)(1-BETA_MAX), 1-h].
  *
  * Run: npx tsx scripts/rtp-study.ts [roundsPerConfig]
  */
 import crypto from 'crypto';
 import { recomputeCrashPoint, PublishedShapingParams } from '../src/core/fairness-engine/verifier';
-import { VolatilitySnapshot, PlayerMixParams, SystemState } from '../src/core/volatility-engine';
+import { VolatilityEngine, VolatilitySnapshot, SystemState, PlayerMix } from '../src/core/volatility-engine';
 
 const N = Number(process.argv[2] ?? 100_000);
-
-const DEFAULT_PARAMS: PlayerMixParams = {
-  conservativePushFactor: 0.25,
-  conservative3xChanceFactor: 0.06,
-  conservative3xMultiplier: 3,
-  greedyPushFactor: 0.4,
-  greedySpikeProbFactor: 0.002,
-  greedySpikeBase: 15,
-  greedySpikeScale: 35,
-  tiltedNearProbFactor: 0.35,
-  tiltedNearMax: 1.75,
-  tiltedNearBase: 1.05,
-};
 
 const SHAPING_PRESETS: Record<string, PublishedShapingParams> = {
   DEFAULT: { instantCrashDivisor: 33, volatility: 1, houseEdge: 0.01 },
@@ -45,8 +33,13 @@ interface Config {
   snapshot: VolatilitySnapshot;
 }
 
-function snap(state: SystemState, mix: VolatilitySnapshot['playerMix'], elasticity: number, tiltNextLow = false): VolatilitySnapshot {
-  return { state, tiltNextLow, playerMix: mix, playerMixParams: { ...DEFAULT_PARAMS }, elasticity };
+function snap(state: SystemState, mix: PlayerMix, elasticity: number, shapingVolatility = 1): VolatilitySnapshot {
+  return {
+    state,
+    playerMix: mix,
+    elasticity,
+    profile: VolatilityEngine.deriveProfile(state, mix, elasticity, shapingVolatility),
+  };
 }
 
 const CONFIGS: Config[] = [
@@ -59,12 +52,12 @@ const CONFIGS: Config[] = [
   { name: 'DEFAULT / CALM / conservative=0.6 / e=1.0',  shaping: SHAPING_PRESETS.DEFAULT, snapshot: snap('CALM', { conservative: 0.6 }, 1.0) },
   { name: 'DEFAULT / CALM / greedy=0.6 / e=1.0',        shaping: SHAPING_PRESETS.DEFAULT, snapshot: snap('CALM', { greedy: 0.6 }, 1.0) },
   { name: 'DEFAULT / CALM / tilted=0.9 / e=1.0',        shaping: SHAPING_PRESETS.DEFAULT, snapshot: snap('CALM', { tilted: 0.9 }, 1.0) },
-  { name: 'DEFAULT / CALM / tilt-low SCHEDULED',        shaping: SHAPING_PRESETS.DEFAULT, snapshot: snap('CALM', { tilted: 0.9 }, 1.0, true) },
-  { name: 'CALM preset / CALM state / no mix',          shaping: SHAPING_PRESETS.CALM,    snapshot: snap('CALM', {}, 1.0) },
-  { name: 'TENSION preset / TENSION state / no mix',    shaping: SHAPING_PRESETS.TENSION, snapshot: snap('TENSION', {}, 1.0) },
-  { name: 'CHAOS preset / CHAOS state / no mix',        shaping: SHAPING_PRESETS.CHAOS,   snapshot: snap('CHAOS', {}, 1.0) },
-  { name: 'RESET preset / RESET state / no mix',        shaping: SHAPING_PRESETS.RESET,   snapshot: snap('RESET', {}, 1.0) },
-  { name: 'EXPOSURE_STEERED / CALM state / no mix',     shaping: SHAPING_PRESETS.EXPOSURE_STEERED, snapshot: snap('CALM', {}, 1.0) },
+  { name: 'CALM preset / CALM state / no mix',          shaping: SHAPING_PRESETS.CALM,    snapshot: snap('CALM', {}, 1.0, 0.8) },
+  { name: 'TENSION preset / TENSION state / no mix',    shaping: SHAPING_PRESETS.TENSION, snapshot: snap('TENSION', {}, 1.0, 1.1) },
+  { name: 'CHAOS preset / CHAOS state / no mix',        shaping: SHAPING_PRESETS.CHAOS,   snapshot: snap('CHAOS', {}, 1.0, 1.6) },
+  { name: 'RESET preset / RESET state / no mix',        shaping: SHAPING_PRESETS.RESET,   snapshot: snap('RESET', {}, 1.0, 0.6) },
+  { name: 'EXPOSURE_STEERED / CALM state / no mix',     shaping: SHAPING_PRESETS.EXPOSURE_STEERED, snapshot: snap('CALM', {}, 1.0, 1.5) },
+  { name: 'WORST CASE (tilted=1 / steered / e=0.7)',    shaping: SHAPING_PRESETS.EXPOSURE_STEERED, snapshot: snap('CALM', { tilted: 1 }, 0.7, 1.5) },
 ];
 
 const CASHOUTS = [1.2, 1.5, 2, 3, 5, 10];
@@ -83,9 +76,14 @@ function studyConfig(cfg: Config) {
   crashes.sort((a, b) => a - b);
   const mean = crashes.reduce((a, b) => a + b, 0) / N;
   const pInstant = crashes.filter(c => c <= 1.0).length / N;
+  const h = cfg.shaping.houseEdge ?? 0.01;
   const rtp = CASHOUTS.map(m => {
     const wins = crashes.length - lowerBound(crashes, m);
-    return (m * wins) / N;
+    const p = wins / N;
+    const empirical = m * p;
+    const sigma = m * Math.sqrt((p * (1 - p)) / N); // SE of m×Bernoulli(p)
+    const theoretical = m * VolatilityEngine.theoreticalSurvival(m, h, cfg.snapshot);
+    return { empirical, ci3: 3 * sigma, theoretical };
   });
   return {
     name: cfg.name,
@@ -114,12 +112,12 @@ const rows = CONFIGS.map(studyConfig);
 
 const fmt = (n: number) => n.toFixed(3);
 console.log(`# RTP study — ${N.toLocaleString()} rounds per configuration\n`);
-console.log('| configuration | mean | median | p90 | p99 | max | P(instant) | ' + CASHOUTS.map(m => `RTP@${m}x`).join(' | ') + ' |');
+console.log('| configuration | mean | median | p90 | p99 | max | P(instant) | ' + CASHOUTS.map(m => `RTP@${m}x (±3σ / theory)`).join(' | ') + ' |');
 console.log('|---|---|---|---|---|---|---|' + CASHOUTS.map(() => '---').join('|') + '|');
 for (const r of rows) {
   console.log(
     `| ${r.name} | ${fmt(r.mean)} | ${fmt(r.median)} | ${fmt(r.p90)} | ${fmt(r.p99)} | ${fmt(r.max)} | ${(r.pInstant * 100).toFixed(2)}% | ` +
-    r.rtp.map(fmt).join(' | ') + ' |',
+    r.rtp.map(x => `${fmt(x.empirical)} ±${x.ci3.toFixed(3)} / ${fmt(x.theoretical)}`).join(' | ') + ' |',
   );
 }
-console.log('\nRTP@mx = m x P(crash >= m); house edge = 1 - RTP. Values > 1 mean the strategy is player-positive (house loses).');
+console.log('\nRTP@mx = m x P(crash >= m); house edge = 1 - RTP. Contract: RTP(m) in [(1-h)(1-BETA_MAX), 1-h] = [0.9405, 0.99] for every m and every configuration.');

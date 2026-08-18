@@ -65,8 +65,10 @@ export function computeParamsCommit(
 
 /**
  * Recompute the final crash point from published data alone.
- * Mirrors FairnessEngine.computeProof + VolatilityEngine.adjustCrashPure,
- * but as a pure function with no engine state.
+ * Mirrors FairnessEngine.computeProof + VolatilityEngine.crashFromRPure,
+ * but as a pure function with no engine state. The uniform draw is never
+ * warped; all shaping flows through the committed snapshot's EdgeProfile,
+ * whose bounds are re-enforced inside crashFromRPure.
  */
 export function recomputeCrashPoint(
   serverSeed: string,
@@ -80,17 +82,10 @@ export function recomputeCrashPoint(
   const hex = hmac.digest('hex');
 
   const h = parseInt(hex.slice(0, 13), 16);
-  let r = h / Math.pow(2, 52);
-
-  const vol = shaping.volatility ?? 1;
-  if (vol !== 1 && vol > 0) r = Math.pow(r, vol);
+  const r = h / Math.pow(2, 52);
 
   const houseEdge = shaping.houseEdge ?? 0.01;
-  if (r < houseEdge) return 1.0;
-
-  const raw = (1 - houseEdge) / (1 - r);
-  const baseCrash = Math.max(1.01, Math.floor(raw * 100) / 100);
-  return VolatilityEngine.adjustCrashPure(baseCrash, hex, snapshot).adjusted;
+  return VolatilityEngine.crashFromRPure(r, houseEdge, snapshot);
 }
 
 export function verifyRound(commitment: FairnessCommitment, reveal: FairnessReveal): VerificationResult {

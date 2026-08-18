@@ -161,19 +161,14 @@ export class FairnessEngine {
     // record of how this round's crashPoint was derived and is returned
     // verbatim at reveal, so later shaping-param or volatility state changes
     // cannot desynchronize the published proof from the outcome.
-    const snapshot = this.volatility.getSnapshot();
     const shapingParams = this.getShapingParams();
+    const snapshot = this.volatility.getSnapshot(shapingParams.volatility ?? 1);
     const proof = this.computeProof(secret, clientSeed, nonce, snapshot);
     const crashPoint = proof.adjusted;
-    // Apply the tilt side effect only for a round that was actually allocated
-    // (the adjust path only runs when the round is not an instant crash).
-    if (proof.raw > 0) {
-      this.volatility.applySchedule(VolatilityEngine.adjustCrashPure(proof.baseCrash, proof.hex, snapshot));
-    }
     // Blinded commitment to the exact mapping (shaping params + volatility
     // snapshot). Published pre-bet; opened at reveal with paramsSalt so an
     // auditor can prove the mapping did not change after bets were known,
-    // without leaking the shaping state (e.g. a scheduled tilt-low) up front.
+    // without leaking the shaping state (e.g. the current edge profile) up front.
     const paramsSalt = crypto.randomBytes(16).toString('hex');
     const paramsCommit = computeParamsCommit(shapingParams, snapshot, paramsSalt);
     this.allocated.set(roundId, { secret, salt, commit, index, proof, shapingParams, paramsSalt, paramsCommit });
@@ -236,15 +231,6 @@ export class FairnessEngine {
     return this.playerMixHistory.slice();
   }
 
-  // Expose getter/setter for playerMix tuning params
-  setPlayerMixParams(params: any) {
-    try { (this.volatility as any).setPlayerMixParams?.(params); } catch (e) {}
-  }
-
-  getPlayerMixParams() {
-    try { return (this.volatility as any).getPlayerMixParams?.() ?? null; } catch (e) { return null; }
-  }
-
   // deterministic per-round nonce generator
   private nextNonce(roundId: string): number {
     const n = this.roundNonces.get(roundId) ?? 0;
@@ -258,12 +244,6 @@ export class FairnessEngine {
   // crash points from seeds.
   setShapingParams(params: Partial<ShapingParams>) {
     this.shapingParams = { ...this.shapingParams, ...params };
-    // If tuning playerMixParams are present, forward them to volatility engine
-    try {
-      if ((this.shapingParams as any).playerMixParams) {
-        (this.volatility as any).setPlayerMixParams?.((this.shapingParams as any).playerMixParams);
-      }
-    } catch (e) {}
   }
 
   getShapingParams(): ShapingParams {
@@ -301,7 +281,7 @@ export class FairnessEngine {
 
   // Snapshot accessor for publishing/committing the current volatility inputs.
   getVolatilitySnapshot(): VolatilitySnapshot {
-    return this.volatility.getSnapshot();
+    return this.volatility.getSnapshot(this.shapingParams.volatility ?? 1);
   }
 
   // Compute a reproducible proof object containing intermediate values used
@@ -312,52 +292,37 @@ export class FairnessEngine {
   // copy of the current one) and never mutates the engine, so verification
   // calls cannot perturb future rounds.
   computeProof(serverSeed: string, clientSeed: string, nonce: number, snapshot?: VolatilitySnapshot): CrashProof {
-    const snap = snapshot ?? this.volatility.getSnapshot();
+    const vol = this.shapingParams.volatility ?? 1;
+    const snap = snapshot ?? this.volatility.getSnapshot(vol);
     const hmac = crypto.createHmac('sha256', serverSeed);
     hmac.update(`${clientSeed}:${nonce}`);
     const hex = hmac.digest('hex');
 
+    // NOTE: instantCrashDivisor has never affected the outcome path (the flag
+    // below is advisory only); the sole instant-crash source is r < houseEdge.
     const instantDiv = this.shapingParams.instantCrashDivisor;
-    let instantCrash = false;
     let modInt: number | undefined;
     if (instantDiv && instantDiv > 1) {
       modInt = parseInt(hex.slice(0, 8), 16);
-      if (modInt % instantDiv === 0) instantCrash = true;
     }
 
-    // Use first 52 bits as a uniform [0, 1) float
+    // Use first 52 bits as a uniform [0, 1) float. The draw is NEVER warped:
+    // all shaping flows through the committed, bounded EdgeProfile.
     const h = parseInt(hex.slice(0, 13), 16);
-    let r = h / Math.pow(2, 52);
-
-    const vol = this.shapingParams.volatility ?? 1;
-    if (vol !== 1 && vol > 0) {
-      r = Math.pow(r, vol);
-    }
+    const r = h / Math.pow(2, 52);
 
     const houseEdge = this.shapingParams.houseEdge ?? 0.01;
-    if (r < houseEdge) {
-      return {
-        hex,
-        instantCrash: true,
-        instantDivisor: instantDiv,
-        modInt,
-        r,
-        volatility: vol,
-        houseEdge,
-        raw: 0,
-        baseCrash: 1.0,
-        adjusted: 1.0,
-        volatilitySnapshot: snap,
-      };
-    }
+    const adjusted = VolatilityEngine.crashFromRPure(r, houseEdge, snap);
+    const instantCrash = adjusted === 1.0;
 
-    const raw = (1 - houseEdge) / (1 - r);
-    const baseCrash = Math.max(1.01, Math.floor(raw * 100) / 100);
-    const adjusted = VolatilityEngine.adjustCrashPure(baseCrash, hex, snap).adjusted;
+    // baseCrash is the beta=0 reference curve (pure 1-h edge), kept in the
+    // proof so auditors can see exactly what the committed profile changed.
+    const raw = instantCrash ? 0 : (1 - houseEdge) / (1 - r);
+    const baseCrash = instantCrash ? 1.0 : Math.max(1.01, Math.floor(raw * 100) / 100);
 
     return {
       hex,
-      instantCrash: instantCrash,
+      instantCrash,
       instantDivisor: instantDiv,
       modInt,
       r,
