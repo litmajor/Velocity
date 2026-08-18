@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:legacy": "npx tsx test/run-tests.ts",
+    "rtp:study": "npx tsx scripts/rtp-study.ts",
     "start": "node dist/vertical-slice.js",
     "lint": "echo \"No linter configured\" && exit 0"
   },
