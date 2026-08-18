@@ -50,9 +50,9 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each confirmed finding
 
 ### Confirmed design properties (documented, NOT changed — see fairness assessment)
 
-- D-1: Exposure above `LIABILITY_THRESHOLD` (10 000) silently rewrites shaping params (volatility 1.5, divisor 20) for *subsequent* commitments (`fairness.test.ts` exposure-coupling test). The current round is unaffected (crash point fixed at allocation).
-- D-2: Player-behavior mix (conservative/greedy/tilted) and win/loss elasticity change crash outcomes for identical seeds (`fairness.test.ts` DOCUMENTED tests).
-- D-3: The final `adjusted` crash point depends on hidden VolatilityEngine state and is not reconstructible from committed data alone; only `baseCrash` is independently verifiable (`fairness.test.ts` hidden-state test).
+- D-1: Exposure above `LIABILITY_THRESHOLD` (10 000) rewrites shaping params (volatility 1.5, divisor 20) for *subsequent* commitments (`fairness.test.ts` exposure-coupling test). The current round is unaffected (crash point fixed at allocation). UPDATE (fairness-transparency phase): no longer silent — the params in force are bound into each round's pre-bet `paramsCommit` and revealed at crash, so steering is auditable per round. Operator control over *which* params are committed remains a trust assumption (see docs/FAIRNESS.md §4).
+- D-2: Player-behavior mix (conservative/greedy/tilted) and win/loss elasticity change crash outcomes for identical seeds (`fairness.test.ts` DOCUMENTED tests). UPDATE: the exact mix/elasticity used for a round is now committed pre-bet and revealed at crash — the influence is visible and provable, but still house-chosen at commitment time. The measured per-mix RTP impact is quantified in docs/FAIRNESS.md §5 (tilted players: ~57% RTP; scheduled tilt-low: ~0%).
+- D-3: ~~The final `adjusted` crash point depends on hidden VolatilityEngine state and is not reconstructible from committed data alone~~ — CLOSED (fairness-transparency phase): a blinded commitment to the full crash mapping (shaping params + complete volatility snapshot) is published before betting and opened at crash; the standalone verifier (`src/core/fairness-engine/verifier.ts`) reconstructs the FINAL crash point from published data alone (INV-F6 now enforced; `fairness.test.ts` transparency suite).
 - D-4: `startBetting()` while CRASHED auto-recovers (unsettled rounds are abandoned, not settled).
 
 ### Bounded risks
@@ -83,7 +83,7 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each confirmed finding
 
 ### Unresolved / needs more evidence
 
-- U-1: House-edge distribution under volatility shaping. The `adjustCrash` modifier (0.5–4.0×) changes the payout distribution in ways not analytically bounded here; a Monte-Carlo RTP study is needed before real money.
+- U-1: ~~House-edge distribution under volatility shaping unknown~~ — MEASURED (fairness-transparency phase, `npm run rtp:study`, 200k rounds/config, docs/FAIRNESS.md §5). Result: the nominal 1% edge does NOT hold. CALM ≈ 84% RTP (16% edge); CHAOS is house-LOSING (RTP up to ~209% at 3x+ cashouts) and is entered deterministically after 5 sub-1.5× crashes — an observable, exploitable +EV regime. Elasticity ≥ 2 and the RESET preset are also player-positive (RTP 1.5–1.7). This is now a confirmed economic defect (re-classified as finding E-1 below) rather than an unknown.
 - U-2: `data/fairness.json` and `tick_ledger.json` are shared global paths (cwd-relative) — multi-instance deployments would collide.
 - U-3: Admin/debug surface authentication was not exercised end-to-end (WS gateway has token checks; the debug HTTP surface was out of scope).
 
@@ -92,6 +92,7 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each confirmed finding
 - Runner: **Vitest 4** (`npm test` → `vitest run`; deterministic: fake timers, fixed-crash fairness stub, seeded LCG for property tests, forked single-file pool because engines share the singleton bus and `data/`).
 - 8 files, **70 tests, 70 passing, 0 failing, 0 skipped** (stable across 5 runs). Legacy harness kept as `npm run test:legacy`.
 - After the persistence hardening phase: 9 files, **94 tests, 94 passing** — added `wallet-ledger.test.ts` (durable ledger properties) and rewrote `recovery.test.ts` (the former DEFECT/DOCUMENTED-gap tests now assert the fixed behavior: restart survival, crash-point recovery, exactly-once payouts/refunds, atomicity, fail-closed corruption, recovery idempotency).
+- After the fairness-transparency phase: **102 tests, 102 passing** — added a transparency suite in `fairness.test.ts` (commit/open of the crash mapping, full-crash reconstruction by the standalone verifier, tamper detection, multi-round evolution under changing hidden state, verification side-effect freedom).
 - Coverage is invariant-driven, not line-driven: races (`betting-races`), wallet properties (`wallet`), monetary edges (`monetary-edges`), settlement (`settlement`), lifecycle (`lifecycle`), fairness+verifier (`fairness`), restart/persistence (`recovery`), event ordering (`event-ordering`).
 - Intentionally not automated: real process-kill during a syscall (torn write simulated instead); WS transport delay tests (gateway logic covered at engine level, where the economic guarantees live).
 
@@ -103,7 +104,7 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each confirmed finding
 
 **For future rounds: YES — by design.** Exposure breaching the liability threshold rewrites shaping params; player-behavior aggregation sets the volatility player mix; wins/losses move elasticity; the operator can call `setShapingParams`/`setPlayerMixParams` at any time. All of these change the seed→crash mapping used at the *next* commitment. Because a round's commitment is published only at its own `startBetting()`, this is operator/state discretion over *uncommitted* rounds — a trust-model question, not a commitment violation.
 
-**Is "provably fair" justified?** Only partially. What a player can verify after reveal: the seed matches the pre-bet hash, and `baseCrash` follows deterministically from (seed, clientSeed, nonce, published houseEdge/volatility) — the independent verifier in `fairness.test.ts` reconstructs it from crypto primitives alone. What a player cannot verify: the `baseCrash → adjusted` volatility layer, which depends on hidden server state (history regime, player mix, elasticity, tilt flag). The honest characterization is: **"provably committed, with a disclosed-parameters base derivation, plus an unverifiable house shaping layer."** To reach full provable fairness, either publish the complete volatility state in the commitment or drop the adjustment layer.
+**Is "provably fair" justified?** ~~Only partially~~ — UPDATED (fairness-transparency phase). A player can now verify after reveal: the seed matches the pre-bet hash, the full crash mapping (shaping params + complete volatility snapshot, including the tilt flag and player mix) matches the pre-bet blinded `paramsCommit`, and the FINAL crash point follows deterministically from the committed seed + committed mapping (`verifyRound` in `src/core/fairness-engine/verifier.ts`). What remains trusted: the operator's *choice* of mapping at commitment time — committed odds can still be player-hostile (tilted mix ≈ 57% RTP, scheduled tilt-low ≈ 0%), they are just no longer hidden or mutable after bets. The honest characterization is now: **"provably committed and fully reconstructible, with operator-chosen (but disclosed-at-reveal) per-round odds."** See docs/FAIRNESS.md for the complete trust model and the measured RTP table.
 
 ## 6. Invariants
 
@@ -112,7 +113,7 @@ See `docs/INVARIANTS.md` (machine-readable YAML-style list; each invariant maps 
 ## 7. Recommended next phase (priority order, from findings)
 
 1. ~~**Persistence hardening** (B-1/B-2/B-3/B-7)~~ — DONE: durable wallet write-ahead ledger, idempotent startup recovery, atomic repo writes, durable payout retry (`docs/RECOVERY.md`).
-2. **Fairness transparency** (D-1..D-3, U-1): publish volatility state in the commitment or remove `adjustCrash`; run an RTP simulation. Decide the trust model before any real-money exposure.
+2. ~~**Fairness transparency** (D-1..D-3, U-1)~~ — DONE: blinded commit/reveal of the full crash mapping + standalone verifier (docs/FAIRNESS.md); RTP study run. NEW BLOCKER from the study — **E-1 (economic, HIGH)**: volatility regimes break the house edge in both directions (CHAOS/RESET/elasticity≥2 are player-positive up to ~2× RTP and CHAOS entry is publicly predictable; CALM ≈ 16% effective edge vs the advertised 1%). The shaping model needs an economic redesign or hard RTP bounds before real money.
 3. **Monitoring/observability** (B-4/B-7): isolate event-bus subscribers, alert on settlement credit failures and invariant violations.
 4. **Player-facing UI / deployment**: last — the engine is now internally consistent under the tested adversarial conditions, but 1–2 are prerequisites for production.
 
@@ -126,3 +127,13 @@ See `docs/INVARIANTS.md` (machine-readable YAML-style list; each invariant maps 
 - `src/core/volatility-engine/index.ts` — tilt-low path uses HMAC-derived entropy instead of `Math.random()` (V-7).
 - `package.json` / `vitest.config.mts` — Vitest wiring (`npm test`), legacy harness kept as `test:legacy`.
 - `test/**` — new suite (8 files, 70 tests) + `test/helpers/rig.ts` deterministic fixture.
+
+Fairness-transparency phase:
+
+- `src/core/volatility-engine/index.ts` — `VolatilitySnapshot` capture, pure static `adjustCrashPure` (all shaping constants read from committed params), side-effect-free instance wrapper.
+- `src/core/fairness-engine/verifier.ts` — NEW: standalone engine-free verifier (`canonicalJson`, `computeParamsCommit`, `recomputeCrashPoint`, `verifyRound`).
+- `src/core/fairness-engine/index.ts` — snapshot captured at allocation; blinded `paramsCommit` created pre-bet and opened at reveal; `computeProof` made side-effect free.
+- `src/core/game-engine/index.ts` — publish `paramsCommit` in `ROUND_STARTED`; publish/persist the opening (`fairnessReveal`) at crash.
+- `src/domains/game/types.ts` — typed `paramsCommit`/`fairnessReveal` on `RoundState` and the round events.
+- `scripts/rtp-study.ts` — NEW: deterministic Monte-Carlo RTP/house-edge study (`npm run rtp:study`).
+- `docs/FAIRNESS.md` — NEW: transparency architecture, trust model, RTP study results.

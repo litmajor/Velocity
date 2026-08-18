@@ -155,9 +155,19 @@ fairness:
     status: enforced
   - id: INV-F6
     statement: The full seed-to-final-crash mapping is reconstructible by an outside verifier from committed/published data.
-    enforced_by: only baseCrash is (independent verifier); the adjustCrash layer depends on hidden volatility state
-    test: test/fairness.test.ts (hidden-state test)
-    status: documented-gap
+    enforced_by: blinded paramsCommit (sha256 over canonical shaping params + volatility snapshot + salt) published pre-bet, opened at crash; standalone verifier (fairness-engine/verifier.ts) recomputes the final crash via pure adjustCrashPure
+    test: test/fairness.test.ts (transparency suite - INV-F6 reconstruction, tamper detection, multi-round evolution)
+    status: enforced
+  - id: INV-F7
+    statement: The crash mapping (shaping params + volatility snapshot) committed before betting is exactly the mapping revealed and used; any post-hoc substitution is detectable.
+    enforced_by: paramsCommit binding + salt opening; snapshot captured at allocation and stored with the proof
+    test: test/fairness.test.ts (tampered-reveal / swapped-seed tests)
+    status: enforced
+  - id: INV-F8
+    statement: Verification is side-effect free - computeProof/computeCrashPoint never mutate volatility state, so audits cannot perturb future rounds.
+    enforced_by: adjustCrashPure is static/pure; tilt scheduling applied only inside allocateNextSeed
+    test: test/fairness.test.ts (no tilt-state mutation test)
+    status: enforced
 
 recovery:
   - id: INV-R1

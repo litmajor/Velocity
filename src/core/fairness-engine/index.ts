@@ -1,6 +1,10 @@
 import crypto from 'crypto';
-import { VolatilityEngine, SystemState } from '../volatility-engine';
+import { VolatilityEngine, SystemState, VolatilitySnapshot } from '../volatility-engine';
+import { computeParamsCommit } from './verifier';
 import { saveJSON, loadJSON, ensureDataDir } from '../../runtime/persistence';
+
+export { canonicalJson, computeParamsCommit, recomputeCrashPoint, verifyRound } from './verifier';
+export type { FairnessCommitment, FairnessReveal, VerificationResult } from './verifier';
 
 export interface FairnessResult {
   serverSeed: string;
@@ -21,6 +25,9 @@ export interface CrashProof {
   raw: number;
   baseCrash: number;
   adjusted: number;
+  // the exact volatility inputs used to map baseCrash -> adjusted; revealed
+  // at crash so the full mapping is reconstructible by outside verifiers
+  volatilitySnapshot?: VolatilitySnapshot;
 }
 
 export interface ShapingParams {
@@ -37,7 +44,10 @@ export class FairnessEngine {
   // Seed chain (hash ladder). Each entry is an unrevealed secret and salt for a future round.
   // The published commit for a round is `hash(secret)`; the revealed value is `secret`.
   private chain: Array<{ secret: string; salt: string }> = [];
-  private allocated = new Map<string, { secret: string; salt?: string; commit: string; index: number; proof: CrashProof }>();
+  private allocated = new Map<string, {
+    secret: string; salt?: string; commit: string; index: number; proof: CrashProof;
+    shapingParams: ShapingParams; paramsSalt: string; paramsCommit: string;
+  }>();
   // per-round nonce tracking for deterministic nonces
   private roundNonces = new Map<string, number>();
   // track used commits to prevent seed reuse attacks
@@ -146,17 +156,31 @@ export class FairnessEngine {
     const index = Date.now();
     const clientSeed = externalClientSeed ?? crypto.randomBytes(8).toString('hex');
     const nonce = this.nextNonce(roundId);
-    // Compute the proof exactly once, at commitment time. The stored proof is
-    // the authoritative record of how this round's crashPoint was derived and
-    // is returned verbatim at reveal, so later shaping-param or volatility
-    // state changes cannot desynchronize the published proof from the outcome.
-    const proof = this.computeProof(secret, clientSeed, nonce);
+    // Compute the proof exactly once, at commitment time, against a frozen
+    // snapshot of the volatility state. The stored proof is the authoritative
+    // record of how this round's crashPoint was derived and is returned
+    // verbatim at reveal, so later shaping-param or volatility state changes
+    // cannot desynchronize the published proof from the outcome.
+    const snapshot = this.volatility.getSnapshot();
+    const shapingParams = this.getShapingParams();
+    const proof = this.computeProof(secret, clientSeed, nonce, snapshot);
     const crashPoint = proof.adjusted;
-    this.allocated.set(roundId, { secret, salt, commit, index, proof });
+    // Apply the tilt side effect only for a round that was actually allocated
+    // (the adjust path only runs when the round is not an instant crash).
+    if (proof.raw > 0) {
+      this.volatility.applySchedule(VolatilityEngine.adjustCrashPure(proof.baseCrash, proof.hex, snapshot));
+    }
+    // Blinded commitment to the exact mapping (shaping params + volatility
+    // snapshot). Published pre-bet; opened at reveal with paramsSalt so an
+    // auditor can prove the mapping did not change after bets were known,
+    // without leaking the shaping state (e.g. a scheduled tilt-low) up front.
+    const paramsSalt = crypto.randomBytes(16).toString('hex');
+    const paramsCommit = computeParamsCommit(shapingParams, snapshot, paramsSalt);
+    this.allocated.set(roundId, { secret, salt, commit, index, proof, shapingParams, paramsSalt, paramsCommit });
     this.usedCommits.add(commit);
     // persist used commits so seed reuse survives restarts
     void this.saveState();
-    return { serverSeed: secret, serverHash: commit, clientSeed, nonce, crashPoint };
+    return { serverSeed: secret, serverHash: commit, clientSeed, nonce, crashPoint, paramsCommit };
   }
 
   // Reveal the secret allocated to the round and remove it from the allocated map.
@@ -165,7 +189,18 @@ export class FairnessEngine {
     const entry = this.allocated.get(roundId);
     if (!entry) throw new Error(`no allocated seed for round ${roundId}`);
     this.allocated.delete(roundId);
-    return { serverSeed: entry.secret, serverHash: entry.commit, salt: entry.salt, proof: entry.proof } as any;
+    return {
+      serverSeed: entry.secret,
+      serverHash: entry.commit,
+      salt: entry.salt,
+      proof: entry.proof,
+      // opening of the pre-bet params commitment: with these an auditor can
+      // recompute paramsCommit AND the final crash point from scratch
+      shapingParams: entry.shapingParams,
+      volatilitySnapshot: entry.proof.volatilitySnapshot,
+      paramsSalt: entry.paramsSalt,
+      paramsCommit: entry.paramsCommit,
+    } as any;
   }
 
   // Record a round result so the volatility engine can update state.
@@ -264,11 +299,20 @@ export class FairnessEngine {
     return this.computeProof(serverSeed, clientSeed, nonce).adjusted;
   }
 
+  // Snapshot accessor for publishing/committing the current volatility inputs.
+  getVolatilitySnapshot(): VolatilitySnapshot {
+    return this.volatility.getSnapshot();
+  }
+
   // Compute a reproducible proof object containing intermediate values used
   // to derive the crash point. This object can be published alongside the
   // revealed serverSeed so clients or auditors can independently verify the
   // crash derivation.
-  computeProof(serverSeed: string, clientSeed: string, nonce: number): CrashProof {
+  // Pure with respect to volatility state: uses the provided snapshot (or a
+  // copy of the current one) and never mutates the engine, so verification
+  // calls cannot perturb future rounds.
+  computeProof(serverSeed: string, clientSeed: string, nonce: number, snapshot?: VolatilitySnapshot): CrashProof {
+    const snap = snapshot ?? this.volatility.getSnapshot();
     const hmac = crypto.createHmac('sha256', serverSeed);
     hmac.update(`${clientSeed}:${nonce}`);
     const hex = hmac.digest('hex');
@@ -303,12 +347,13 @@ export class FairnessEngine {
         raw: 0,
         baseCrash: 1.0,
         adjusted: 1.0,
+        volatilitySnapshot: snap,
       };
     }
 
     const raw = (1 - houseEdge) / (1 - r);
     const baseCrash = Math.max(1.01, Math.floor(raw * 100) / 100);
-    const adjusted = this.volatility.adjustCrash(baseCrash, hex);
+    const adjusted = VolatilityEngine.adjustCrashPure(baseCrash, hex, snap).adjusted;
 
     return {
       hex,
@@ -321,6 +366,7 @@ export class FairnessEngine {
       raw,
       baseCrash,
       adjusted,
+      volatilitySnapshot: snap,
     };
   }
 

@@ -1,5 +1,44 @@
 export type SystemState = 'CALM' | 'TENSION' | 'CHAOS' | 'RESET';
 
+export interface PlayerMix {
+  conservative?: number;
+  greedy?: number;
+  tilted?: number;
+}
+
+export interface PlayerMixParams {
+  conservativePushFactor: number;
+  conservative3xChanceFactor: number;
+  conservative3xMultiplier: number;
+  greedyPushFactor: number;
+  greedySpikeProbFactor: number;
+  greedySpikeBase: number;
+  greedySpikeScale: number;
+  tiltedNearProbFactor: number;
+  tiltedNearMax: number;
+  tiltedNearBase: number;
+}
+
+/**
+ * The complete set of volatility inputs that shape a crash point beyond the
+ * seed-derived baseCrash. Captured at seed-allocation time, committed to
+ * (blinded) before betting opens, and revealed at crash so an outside
+ * verifier can reconstruct the exact final crash point.
+ */
+export interface VolatilitySnapshot {
+  state: SystemState;
+  tiltNextLow: boolean;
+  playerMix: PlayerMix;
+  playerMixParams: PlayerMixParams;
+  elasticity: number;
+}
+
+export interface AdjustResult {
+  adjusted: number;
+  // whether a sharp low crash should be scheduled for the NEXT round
+  scheduleTiltNextLow: boolean;
+}
+
 export class VolatilityEngine {
   // Optional player composition mix used to bias global distribution
   private playerMix: { conservative?: number; greedy?: number; tilted?: number } = {};
@@ -10,18 +49,7 @@ export class VolatilityEngine {
   private readonly maxHistory = 64;
 
   // tunable parameters for player-mix shaping (defaults chosen conservatively)
-  private playerMixParams: {
-    conservativePushFactor: number;
-    conservative3xChanceFactor: number;
-    conservative3xMultiplier: number;
-    greedyPushFactor: number;
-    greedySpikeProbFactor: number;
-    greedySpikeBase: number;
-    greedySpikeScale: number;
-    tiltedNearProbFactor: number;
-    tiltedNearMax: number;
-    tiltedNearBase: number;
-  } = {
+  private playerMixParams: PlayerMixParams = {
     conservativePushFactor: 0.25,
     conservative3xChanceFactor: 0.06,
     conservative3xMultiplier: 3,
@@ -86,8 +114,26 @@ export class VolatilityEngine {
   }
 
   // Accept aggregated player mix to influence global shaping behavior
-  setPlayerMix(mix: { conservative?: number; greedy?: number; tilted?: number }) {
+  setPlayerMix(mix: PlayerMix) {
     this.playerMix = { ...this.playerMix, ...mix };
+  }
+
+  // Capture every input that adjustCrash depends on, so the exact mapping
+  // used for a round can be committed to and later revealed/verified.
+  getSnapshot(): VolatilitySnapshot {
+    return {
+      state: this.getState(),
+      tiltNextLow: this.tiltNextLow,
+      playerMix: { ...this.playerMix },
+      playerMixParams: { ...this.playerMixParams },
+      elasticity: this.getElasticity(),
+    };
+  }
+
+  // Apply the tilt side effect produced by adjustCrashPure for a round that
+  // was actually allocated (verification-only recomputations must not mutate).
+  applySchedule(result: AdjustResult) {
+    this.tiltNextLow = result.scheduleTiltNextLow;
   }
 
   // Allow external tuning of the internal probability/weight parameters
@@ -122,7 +168,18 @@ export class VolatilityEngine {
 
   // Given a base crash and a hex-derived uniform value [0,1), deterministically
   // compute an adjusted crash according to the current state and elasticity.
+  // Mutates the tilt schedule; use adjustCrashPure + applySchedule to separate
+  // computation from the side effect.
   adjustCrash(baseCrash: number, hexEntropy: string): number {
+    const result = VolatilityEngine.adjustCrashPure(baseCrash, hexEntropy, this.getSnapshot());
+    this.applySchedule(result);
+    return result.adjusted;
+  }
+
+  // Pure, static form of the crash adjustment: everything it depends on is in
+  // the snapshot, so an outside verifier holding the revealed snapshot can
+  // reproduce the exact final crash point. Never touches engine state.
+  static adjustCrashPure(baseCrash: number, hexEntropy: string, snap: VolatilitySnapshot): AdjustResult {
     const ranges: Record<SystemState, [number, number]> = {
       CALM: [0.7, 1.0],
       TENSION: [0.9, 1.2],
@@ -130,8 +187,7 @@ export class VolatilityEngine {
       RESET: [0.8, 1.3],
     };
 
-    const st = this.getState();
-    const [minM, maxM] = ranges[st];
+    const [minM, maxM] = ranges[snap.state];
 
     // Derive a uniform number u in [0,1) from a slice of the hex entropy
     const slice = hexEntropy.slice(13, 21) || hexEntropy.slice(0,8);
@@ -140,18 +196,17 @@ export class VolatilityEngine {
     let modifier = minM + (maxM - minM) * u;
 
     // Apply biases based on player composition (global shaping only)
-    const cons = this.playerMix.conservative ?? 0;
-    const greedy = this.playerMix.greedy ?? 0;
-    const tilted = this.playerMix.tilted ?? 0;
-    const params = this.playerMixParams;
+    const cons = snap.playerMix.conservative ?? 0;
+    const greedy = snap.playerMix.greedy ?? 0;
+    const tilted = snap.playerMix.tilted ?? 0;
+    const params = snap.playerMixParams;
 
     // If a tilt sequence was requested previously, force a sharp low crash now
-    if (this.tiltNextLow) {
-      this.tiltNextLow = false;
+    if (snap.tiltNextLow) {
       const lowSlice = hexEntropy.slice(21, 25) || '0';
       const lowU = (parseInt(lowSlice, 16) % 1000) / 1000;
       const low = 1.01 + lowU * 0.2;
-      return Math.max(1.01, Math.floor(low * 100) / 100);
+      return { adjusted: Math.max(1.01, Math.floor(low * 100) / 100), scheduleTiltNextLow: false };
     }
 
     // Conservative players: bias mass toward modest multipliers (1.2-1.5)
@@ -162,7 +217,7 @@ export class VolatilityEngine {
       const chanceSlice = hexEntropy.slice(21, 25) || '0';
       const chance = (parseInt(chanceSlice, 16) % 1000) / 1000;
       if (chance < params.conservative3xChanceFactor * cons) {
-        return Math.max(1.01, Math.floor(baseCrash * 3 * 100) / 100);
+        return { adjusted: Math.max(1.01, Math.floor(baseCrash * params.conservative3xMultiplier * 100) / 100), scheduleTiltNextLow: false };
       }
     }
 
@@ -174,7 +229,7 @@ export class VolatilityEngine {
       const spikeSlice = hexEntropy.slice(5, 9) || '0';
       const spikeChance = (parseInt(spikeSlice, 16) % 10000) / 10000;
       if (spikeChance < params.greedySpikeProbFactor * greedy) {
-        return Math.max(1.01, Math.floor(baseCrash * (15 + Math.floor(35 * greedy)) * 100) / 100);
+        return { adjusted: Math.max(1.01, Math.floor(baseCrash * (params.greedySpikeBase + Math.floor(params.greedySpikeScale * greedy)) * 100) / 100), scheduleTiltNextLow: false };
       }
     }
 
@@ -187,20 +242,18 @@ export class VolatilityEngine {
         // choose a multiplier modestly above 1, appearing as a near-miss
         const near = params.tiltedNearBase + params.tiltedNearMax * nearVal;
         // schedule a sharp loss for the next round
-        this.tiltNextLow = true;
-        return Math.max(1.01, Math.floor(near * 100) / 100);
+        return { adjusted: Math.max(1.01, Math.floor(near * 100) / 100), scheduleTiltNextLow: true };
       }
     }
 
-    // Apply elasticity computed from wins/losses
-    const elasticity = this.getElasticity();
-    modifier = modifier * elasticity;
+    // Apply elasticity captured in the snapshot
+    modifier = modifier * snap.elasticity;
 
     // clamp modifier to a safe range to avoid runaway multipliers
     modifier = Math.max(0.5, Math.min(modifier, 4.0));
 
     const adjusted = Math.max(1.01, Math.floor(baseCrash * modifier * 100) / 100);
-    return adjusted;
+    return { adjusted, scheduleTiltNextLow: snap.tiltNextLow };
   }
 }
 

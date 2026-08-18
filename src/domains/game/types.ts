@@ -8,6 +8,9 @@ export interface RoundState {
   phase:          RoundPhase;
   serverSeed:     string;   // hidden until crash, then revealed
   serverHash:     string;   // committed at ROUND_STARTED
+  // blinded commitment to the exact crash mapping (shaping params + volatility
+  // snapshot), published at ROUND_STARTED and opened at crash
+  paramsCommit?:  string;
   clientSeed:     string;
   nonce:          number;
   crashPoint:     number;   // pre-determined, hidden until crash
@@ -24,6 +27,12 @@ export interface RoundState {
   // set by the startup RecoveryEngine when it force-settles an interrupted round
   recovered?:      boolean;
   recoveryAction?: string;
+  // opening of paramsCommit, persisted at crash for offline audits
+  fairnessReveal?: {
+    shapingParams:      ShapingParams;
+    volatilitySnapshot: unknown;
+    paramsSalt:         string;
+  };
 }
 
 export type SystemState = 'CALM' | 'TENSION' | 'CHAOS' | 'RESET';
@@ -67,6 +76,7 @@ export type GameEvents = {
     roundId:       string;
     roundNumber:   number;
     serverHash:    string;   // hash of serverSeed — players can verify later
+    paramsCommit?: string;   // blinded commit of the crash mapping in force
     bettingEndsAt: number;
     clientSeed:    string;
     nonce:         number;
@@ -117,6 +127,11 @@ export type GameEvents = {
     serverSeed:  string;   // revealed on crash for provable fairness
     clientSeed:  string;
     nonce:       number;
+    // opening of the pre-bet paramsCommit (see FairnessEngine.revealSeed)
+    paramsCommit?:       string;
+    paramsSalt?:         string;
+    shapingParams?:      ShapingParams;
+    volatilitySnapshot?: unknown;
   };
   BET_PLACED: {
     roundId: string;
