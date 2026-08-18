@@ -6,61 +6,68 @@ export interface PlayerMix {
   tilted?: number;
 }
 
-export interface PlayerMixParams {
-  conservativePushFactor: number;
-  conservative3xChanceFactor: number;
-  conservative3xMultiplier: number;
-  greedyPushFactor: number;
-  greedySpikeProbFactor: number;
-  greedySpikeBase: number;
-  greedySpikeScale: number;
-  tiltedNearProbFactor: number;
-  tiltedNearMax: number;
-  tiltedNearBase: number;
+/**
+ * The committed economic shape of a round (see docs/ECONOMICS.md).
+ *
+ * The crash survival function is
+ *   S(m) = P(crash >= m) = (1 - h) * phi(m) / m
+ *   phi(m) = 1 - beta * (1 - m^(-lambda))
+ * so the return of a fixed cashout at m is
+ *   RTP(m) = m * S(m) = (1 - h) * phi(m)  in  [(1-h)(1-BETA_MAX), 1-h]
+ * for EVERY multiplier m — bounded, never player-positive.
+ *
+ * `beta`   = extra edge accrued in the tail (0 = pure base curve).
+ * `lambda` = where the extra edge accrues (large = early / thin tail,
+ *            small = late / relatively generous mid-tail).
+ */
+export interface EdgeProfile {
+  beta: number;
+  lambda: number;
 }
 
 /**
- * The complete set of volatility inputs that shape a crash point beyond the
- * seed-derived baseCrash. Captured at seed-allocation time, committed to
- * (blinded) before betting opens, and revealed at crash so an outside
- * verifier can reconstruct the exact final crash point.
+ * The complete set of volatility inputs that shape a crash point. Captured at
+ * seed-allocation time, committed to (blinded) before betting opens, and
+ * revealed at crash so an outside verifier can reconstruct the exact final
+ * crash point. `profile` is the resolved, clamped EdgeProfile actually used.
  */
 export interface VolatilitySnapshot {
   state: SystemState;
-  tiltNextLow: boolean;
   playerMix: PlayerMix;
-  playerMixParams: PlayerMixParams;
   elasticity: number;
+  profile: EdgeProfile;
 }
 
-export interface AdjustResult {
-  adjusted: number;
-  // whether a sharp low crash should be scheduled for the NEXT round
-  scheduleTiltNextLow: boolean;
-}
+// Hard economic bounds enforced INSIDE the pure derivation, so no committed
+// snapshot — however constructed — can escape the contract.
+export const BETA_MAX = 0.05;
+export const LAMBDA_MIN = 0.05;
+export const LAMBDA_MAX = 3.0;
+export const HOUSE_EDGE_MIN = 0.001;
+export const HOUSE_EDGE_MAX = 0.02;
+export const CRASH_CAP = 10_000;
+
+// NaN/Infinity-safe clamp: non-finite input fails safe to the LOWER bound
+// (for beta that is 0 extra edge; for lambda the earliest-accrual shape).
+const clamp = (x: number, lo: number, hi: number) =>
+  Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : lo;
+
+// Per-regime base profiles: same bounded edge contract, different shape.
+// CALM harvests its extra edge early (thin tail); CHAOS accrues it very late
+// (relatively generous mid-tail); see docs/ECONOMICS.md for the derivation.
+const STATE_PROFILES: Record<SystemState, EdgeProfile> = {
+  CALM:    { beta: 0.04,  lambda: 1.2 },
+  TENSION: { beta: 0.03,  lambda: 0.5 },
+  CHAOS:   { beta: 0.02,  lambda: 0.1 },
+  RESET:   { beta: 0.015, lambda: 0.3 },
+};
 
 export class VolatilityEngine {
-  // Optional player composition mix used to bias global distribution
-  private playerMix: { conservative?: number; greedy?: number; tilted?: number } = {};
-  // Internal flag to force a low crash following a near-miss (for tilted players)
-  private tiltNextLow = false;
+  // Optional player composition mix used to bias the committed profile
+  private playerMix: PlayerMix = {};
   private history: number[] = [];
   private state: SystemState = 'CALM';
   private readonly maxHistory = 64;
-
-  // tunable parameters for player-mix shaping (defaults chosen conservatively)
-  private playerMixParams: PlayerMixParams = {
-    conservativePushFactor: 0.25,
-    conservative3xChanceFactor: 0.06,
-    conservative3xMultiplier: 3,
-    greedyPushFactor: 0.4,
-    greedySpikeProbFactor: 0.002,
-    greedySpikeBase: 15,
-    greedySpikeScale: 35,
-    tiltedNearProbFactor: 0.35,
-    tiltedNearMax: 1.75,
-    tiltedNearBase: 1.05,
-  };
 
   // track monetary sums for wins/losses to compute elasticity
   private winSum = 0;
@@ -100,49 +107,36 @@ export class VolatilityEngine {
     }
   }
 
-  // Compute elasticity >0 where >1 expands volatility (bigger multipliers),
-  // <1 contracts volatility. Bound to [0.7, 2.0]. Based on loss/win imbalance.
+  // Compute elasticity >0 where >1 shifts edge accrual later (feels more
+  // generous mid-tail), <1 earlier. Bound to [0.7, 2.0]. Based on loss/win
+  // imbalance. Affects SHAPE only — the RTP band is unchanged.
   getElasticity(): number {
     const wins = this.winSum || 0.0001;
     const losses = this.lossSum || 0.0001;
-    // ratio >1 means more losses than wins -> enlarge volatility
     const ratio = losses / wins;
-    // map ratio to elasticity via gentle scaling
-    const raw = 1 + (ratio - 1) * 0.25; // scale down sensitivity
-    const clamped = Math.max(0.7, Math.min(2.0, raw));
-    return clamped;
+    const raw = 1 + (ratio - 1) * 0.25;
+    return clamp(raw, 0.7, 2.0);
   }
 
-  // Accept aggregated player mix to influence global shaping behavior
+  // Accept aggregated player mix to influence the committed profile
   setPlayerMix(mix: PlayerMix) {
     this.playerMix = { ...this.playerMix, ...mix };
   }
 
-  // Capture every input that adjustCrash depends on, so the exact mapping
-  // used for a round can be committed to and later revealed/verified.
-  getSnapshot(): VolatilitySnapshot {
+  // Capture every input that shapes a crash point, with the resolved profile,
+  // so the exact mapping used for a round can be committed and verified.
+  // `shapingVolatility` is the legacy ShapingParams.volatility knob: it no
+  // longer warps the uniform draw; it shifts the committed edge within bounds.
+  getSnapshot(shapingVolatility = 1): VolatilitySnapshot {
+    const state = this.getState();
+    const playerMix = { ...this.playerMix };
+    const elasticity = this.getElasticity();
     return {
-      state: this.getState(),
-      tiltNextLow: this.tiltNextLow,
-      playerMix: { ...this.playerMix },
-      playerMixParams: { ...this.playerMixParams },
-      elasticity: this.getElasticity(),
+      state,
+      playerMix,
+      elasticity,
+      profile: VolatilityEngine.deriveProfile(state, playerMix, elasticity, shapingVolatility),
     };
-  }
-
-  // Apply the tilt side effect produced by adjustCrashPure for a round that
-  // was actually allocated (verification-only recomputations must not mutate).
-  applySchedule(result: AdjustResult) {
-    this.tiltNextLow = result.scheduleTiltNextLow;
-  }
-
-  // Allow external tuning of the internal probability/weight parameters
-  setPlayerMixParams(params: Partial<typeof this.playerMixParams>) {
-    this.playerMixParams = { ...this.playerMixParams, ...params };
-  }
-
-  getPlayerMixParams() {
-    return { ...this.playerMixParams };
   }
 
   // Determine state from recent history using simple heuristics.
@@ -166,94 +160,101 @@ export class VolatilityEngine {
     }
   }
 
-  // Given a base crash and a hex-derived uniform value [0,1), deterministically
-  // compute an adjusted crash according to the current state and elasticity.
-  // Mutates the tilt schedule; use adjustCrashPure + applySchedule to separate
-  // computation from the side effect.
-  adjustCrash(baseCrash: number, hexEntropy: string): number {
-    const result = VolatilityEngine.adjustCrashPure(baseCrash, hexEntropy, this.getSnapshot());
-    this.applySchedule(result);
-    return result.adjusted;
+  /**
+   * Pure, deterministic profile derivation. All regime / player-mix /
+   * elasticity / steering influence funnels through here, and the result is
+   * clamped to the economic bounds — so every input combination stays inside
+   * the contract band.
+   */
+  static deriveProfile(
+    state: SystemState,
+    playerMix: PlayerMix,
+    elasticity: number,
+    shapingVolatility = 1,
+  ): EdgeProfile {
+    const base = STATE_PROFILES[state];
+    let beta = base.beta;
+    let lambda = base.lambda;
+
+    // Legacy volatility knob (exposure steering / presets): >1 adds bounded
+    // edge, <1 removes it. vol=1.5 -> +0.01 edge; vol=0.6 -> -0.008.
+    beta += 0.02 * clamp(shapingVolatility - 1, -0.5, 1);
+
+    // Tilted players: bounded extra edge (declared, committed, capped).
+    const tilted = playerMix.tilted ?? 0;
+    if (tilted > 0.3) beta += 0.02 * tilted;
+
+    // Conservative mix: edge accrues earlier (front-loaded modest outcomes).
+    const cons = playerMix.conservative ?? 0;
+    if (cons > 0.4) lambda *= 1 + 0.5 * cons;
+
+    // Greedy mix: edge accrues later (relatively richer mid-tail).
+    const greedy = playerMix.greedy ?? 0;
+    if (greedy > 0.4) lambda *= 1 - 0.4 * greedy;
+
+    // Elasticity shifts edge accrual later when players are net losing.
+    lambda /= clamp(elasticity, 0.7, 2.0);
+
+    return {
+      beta: clamp(beta, 0, BETA_MAX),
+      lambda: clamp(lambda, LAMBDA_MIN, LAMBDA_MAX),
+    };
   }
 
-  // Pure, static form of the crash adjustment: everything it depends on is in
-  // the snapshot, so an outside verifier holding the revealed snapshot can
-  // reproduce the exact final crash point. Never touches engine state.
-  static adjustCrashPure(baseCrash: number, hexEntropy: string, snap: VolatilitySnapshot): AdjustResult {
-    const ranges: Record<SystemState, [number, number]> = {
-      CALM: [0.7, 1.0],
-      TENSION: [0.9, 1.2],
-      CHAOS: [1.2, 3.0],
-      RESET: [0.8, 1.3],
-    };
+  /**
+   * Pure crash derivation from the seed-derived uniform r in [0,1) and a
+   * committed snapshot. Implements the inverse of
+   *   S(m) = (1 - h) * (1 - beta * (1 - m^(-lambda))) / m
+   * i.e. solves  u*m = (1-h)*phi(m)  for m, where u = 1 - r, via a fixed
+   * 64-step bisection on [1, CRASH_CAP] (deterministic and reproducible by
+   * outside verifiers), then floors to cents (house-favoring).
+   *
+   * r < h  =>  instant crash at 1.00 (exactly the u > (1-h)*phi(1) region).
+   * The house edge and profile are re-clamped here so NO committed values can
+   * produce a crash distribution outside the contract band.
+   */
+  static crashFromRPure(r: number, houseEdge: number, snap: VolatilitySnapshot): number {
+    const h = clamp(houseEdge, HOUSE_EDGE_MIN, HOUSE_EDGE_MAX);
+    if (r < h) return 1.0;
 
-    const [minM, maxM] = ranges[snap.state];
+    const beta = clamp(snap.profile.beta, 0, BETA_MAX);
+    const lambda = clamp(snap.profile.lambda, LAMBDA_MIN, LAMBDA_MAX);
+    const u = 1 - r; // in (0, 1-h]
 
-    // Derive a uniform number u in [0,1) from a slice of the hex entropy
-    const slice = hexEntropy.slice(13, 21) || hexEntropy.slice(0,8);
-    const u = parseInt(slice, 16) / Math.pow(2, slice.length * 4);
+    const phi = (m: number) => 1 - beta * (1 - Math.pow(m, -lambda));
 
-    let modifier = minM + (maxM - minM) * u;
-
-    // Apply biases based on player composition (global shaping only)
-    const cons = snap.playerMix.conservative ?? 0;
-    const greedy = snap.playerMix.greedy ?? 0;
-    const tilted = snap.playerMix.tilted ?? 0;
-    const params = snap.playerMixParams;
-
-    // If a tilt sequence was requested previously, force a sharp low crash now
-    if (snap.tiltNextLow) {
-      const lowSlice = hexEntropy.slice(21, 25) || '0';
-      const lowU = (parseInt(lowSlice, 16) % 1000) / 1000;
-      const low = 1.01 + lowU * 0.2;
-      return { adjusted: Math.max(1.01, Math.floor(low * 100) / 100), scheduleTiltNextLow: false };
+    // Above the cap the tail is truncated: crash = CRASH_CAP.
+    if (u * CRASH_CAP < (1 - h) * phi(CRASH_CAP)) {
+      return CRASH_CAP;
     }
 
-    // Conservative players: bias mass toward modest multipliers (1.2-1.5)
-    if (cons > 0.4) {
-      // push modifier toward lower-mid range
-      modifier = modifier * (1 - params.conservativePushFactor * cons) + 1.25 * (params.conservativePushFactor * cons);
-      // occasional nicer win (3x) with small chance proportional to cons
-      const chanceSlice = hexEntropy.slice(21, 25) || '0';
-      const chance = (parseInt(chanceSlice, 16) % 1000) / 1000;
-      if (chance < params.conservative3xChanceFactor * cons) {
-        return { adjusted: Math.max(1.01, Math.floor(baseCrash * params.conservative3xMultiplier * 100) / 100), scheduleTiltNextLow: false };
-      }
+    // f(m) = u*m - (1-h)*phi(m): f(1) = u-(1-h) <= 0, f(cap) >= 0, strictly
+    // increasing => unique root; 64 bisection steps reach double precision.
+    let lo = 1;
+    let hi = CRASH_CAP;
+    for (let i = 0; i < 64; i++) {
+      const mid = (lo + hi) / 2;
+      if (mid * u - (1 - h) * phi(mid) < 0) lo = mid;
+      else hi = mid;
     }
 
-    // Greedy players: create many near-zero wins and rare spikes
-    if (greedy > 0.4) {
-      // nudge modifier down toward 1.0 for many small crashes
-      modifier = modifier * (1 - params.greedyPushFactor * greedy) + 1.0 * (params.greedyPushFactor * greedy);
-      // rare spike (e.g., 20x) with tiny probability proportional to greedy
-      const spikeSlice = hexEntropy.slice(5, 9) || '0';
-      const spikeChance = (parseInt(spikeSlice, 16) % 10000) / 10000;
-      if (spikeChance < params.greedySpikeProbFactor * greedy) {
-        return { adjusted: Math.max(1.01, Math.floor(baseCrash * (params.greedySpikeBase + Math.floor(params.greedySpikeScale * greedy)) * 100) / 100), scheduleTiltNextLow: false };
-      }
-    }
+    return Math.max(1.01, Math.floor(hi * 100) / 100);
+  }
 
-    // Tilted players: create near-miss outcomes and then schedule a sharp loss next
-    if (tilted > 0.3) {
-      const nearSlice = hexEntropy.slice(9, 13) || '0';
-      const nearVal = (parseInt(nearSlice, 16) % 1000) / 1000;
-      // produce a near-miss in the 1.1-1.8 band with probability scaled by tilted
-      if (nearVal < params.tiltedNearProbFactor * tilted) {
-        // choose a multiplier modestly above 1, appearing as a near-miss
-        const near = params.tiltedNearBase + params.tiltedNearMax * nearVal;
-        // schedule a sharp loss for the next round
-        return { adjusted: Math.max(1.01, Math.floor(near * 100) / 100), scheduleTiltNextLow: true };
-      }
-    }
-
-    // Apply elasticity captured in the snapshot
-    modifier = modifier * snap.elasticity;
-
-    // clamp modifier to a safe range to avoid runaway multipliers
-    modifier = Math.max(0.5, Math.min(modifier, 4.0));
-
-    const adjusted = Math.max(1.01, Math.floor(baseCrash * modifier * 100) / 100);
-    return { adjusted, scheduleTiltNextLow: snap.tiltNextLow };
+  /**
+   * Closed-form survival probability of the committed distribution:
+   *   P(crash >= m) = (1 - h) * phi(m) / m   for m in (1, CRASH_CAP]
+   * Used by the economic test suite to compare empirical results against the
+   * intended theoretical distribution.
+   */
+  static theoreticalSurvival(m: number, houseEdge: number, snap: VolatilitySnapshot): number {
+    const h = clamp(houseEdge, HOUSE_EDGE_MIN, HOUSE_EDGE_MAX);
+    if (m <= 1) return 1;
+    if (m > CRASH_CAP) return 0;
+    const beta = clamp(snap.profile.beta, 0, BETA_MAX);
+    const lambda = clamp(snap.profile.lambda, LAMBDA_MIN, LAMBDA_MAX);
+    const phi = 1 - beta * (1 - Math.pow(m, -lambda));
+    return ((1 - h) * phi) / m;
   }
 }
 

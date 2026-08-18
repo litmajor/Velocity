@@ -2,26 +2,23 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import crypto from 'crypto';
 import { FairnessEngine } from '../src/core/fairness-engine';
 import { verifyRound, recomputeCrashPoint, computeParamsCommit } from '../src/core/fairness-engine/verifier';
-import { VolatilityEngine } from '../src/core/volatility-engine';
+import { VolatilityEngine, BETA_MAX, CRASH_CAP } from '../src/core/volatility-engine';
 import { makeRig, collect, Rig } from './helpers/rig';
 
 /**
- * Independent verifier: replicates the seed → baseCrash derivation using only
- * crypto primitives and the published shaping params (no engine code).
- * NOTE: the final `adjusted` crash point additionally depends on hidden
- * VolatilityEngine state (history, playerMix, elasticity, tiltNextLow) and is
- * NOT reconstructible from committed data alone — see fairness assessment.
+ * Independent verifier: replicates the seed → baseCrash (beta=0 reference
+ * curve) derivation using only crypto primitives and the published shaping
+ * params (no engine code). The FINAL crash point is reconstructed separately
+ * via the committed snapshot's EdgeProfile (see verifyRound tests below).
  */
 function independentBaseCrash(
   serverSeed: string,
   clientSeed: string,
   nonce: number,
   houseEdge = 0.01,
-  volatility = 1,
 ): { hex: string; baseCrash: number } {
   const hex = crypto.createHmac('sha256', serverSeed).update(`${clientSeed}:${nonce}`).digest('hex');
-  let r = parseInt(hex.slice(0, 13), 16) / 2 ** 52;
-  if (volatility !== 1 && volatility > 0) r = Math.pow(r, volatility);
+  const r = parseInt(hex.slice(0, 13), 16) / 2 ** 52;
   if (r < houseEdge) return { hex, baseCrash: 1.0 };
   const raw = (1 - houseEdge) / (1 - r);
   return { hex, baseCrash: Math.max(1.01, Math.floor(raw * 100) / 100) };
@@ -143,85 +140,93 @@ describe('round-level fairness (commit → reveal → verify)', () => {
       crash.clientSeed,
       crash.nonce,
       crash.proof.houseEdge,
-      crash.proof.volatility,
     );
     expect(hex).toBe(crash.proof.hex);
     expect(baseCrash).toBe(crash.proof.baseCrash);
   });
 
-  // DESIGN FINDING V-F2: the final crash point is NOT reconstructible from
-  // committed/published data once VolatilityEngine state has evolved.
-  it('DOCUMENTED: adjusted crash point depends on hidden volatility state', () => {
+  // Regime state changes the committed SHAPE (EdgeProfile), so an engine in a
+  // different regime produces different crash points for the same seed — but
+  // the actual mapping used is committed pre-bet and fully verifiable.
+  it('regime state changes the committed profile (and is committed, not hidden)', () => {
     const stateful = new FairnessEngine();
-    // evolve hidden state: five sub-1.5 rounds force the CHAOS regime
+    // evolve state: five sub-1.5 rounds force the CHAOS regime
     for (let i = 0; i < 5; i++) stateful.recordRound(1.2);
     stateful.ensureChain(16);
-    // find a non-instant-crash allocation so the volatility layer applies
-    let alloc: ReturnType<FairnessEngine['allocateNextSeed']> | null = null;
-    let reveal: any = null;
-    let freshProof: any = null;
-    for (let i = 0; i < 12; i++) {
+    const chaosSnap = stateful.getVolatilitySnapshot();
+    const calmSnap = new FairnessEngine().getVolatilitySnapshot();
+    expect(chaosSnap.state).toBe('CHAOS');
+    expect(calmSnap.state).toBe('CALM');
+    expect(chaosSnap.profile).not.toEqual(calmSnap.profile);
+    // some non-instant crash values differ between the two committed profiles
+    let diverged = 0;
+    for (let i = 0; i < 32; i++) {
       const a = stateful.allocateNextSeed('rX' + i);
       const r = stateful.revealSeed('rX' + i);
-      const p = new FairnessEngine().computeProof(r.serverSeed, a.clientSeed, a.nonce);
-      if (p.baseCrash >= 1.3) {
-        alloc = a;
-        reveal = r;
-        freshProof = p;
-        break;
-      }
+      const fresh = new FairnessEngine().computeProof(r.serverSeed, a.clientSeed, a.nonce);
+      expect(fresh.baseCrash).toBe(
+        independentBaseCrash(r.serverSeed, a.clientSeed, a.nonce).baseCrash,
+      );
+      if (fresh.adjusted !== a.crashPoint) diverged++;
     }
-    expect(alloc).toBeTruthy();
-    expect(freshProof.baseCrash).toBe(
-      independentBaseCrash(reveal.serverSeed, alloc!.clientSeed, alloc!.nonce).baseCrash,
-    );
-    // the adjusted value diverges because CHAOS≠CALM modifiers are disjoint
-    expect(freshProof.adjusted).not.toBe(alloc!.crashPoint);
+    expect(diverged).toBeGreaterThan(0);
   });
 });
 
-describe('VolatilityEngine determinism and shaping', () => {
-  it('adjustCrash is deterministic for identical state and entropy (incl. tilt path)', () => {
-    const mk = () => {
-      const v = new VolatilityEngine();
-      v.setPlayerMix({ tilted: 1 });
-      return v;
-    };
-    const a = mk();
-    const b = mk();
-    // hex chosen so slice(9,13) is '0000' → triggers the near-miss + tiltNextLow path
-    const hex1 = 'fffffffff0000fffffffffffffffffff';
-    const hex2 = 'abcdefabcdefabcdefabcdefabcdefab';
-    const seqA = [a.adjustCrash(2.0, hex1), a.adjustCrash(2.0, hex2), a.adjustCrash(3.0, hex2)];
-    const seqB = [b.adjustCrash(2.0, hex1), b.adjustCrash(2.0, hex2), b.adjustCrash(3.0, hex2)];
-    expect(seqA).toEqual(seqB);
-  });
+describe('VolatilityEngine determinism and bounded shaping', () => {
+  const draw = (hex: string) => parseInt(hex.slice(0, 13), 16) / 2 ** 52;
 
-  it('adjusted crash never drops below 1.01 and modifier is clamped', () => {
-    const v = new VolatilityEngine();
-    for (let i = 0; i < 200; i++) {
-      const hex = crypto.randomBytes(16).toString('hex');
-      const adj = v.adjustCrash(1.01, hex);
-      expect(adj).toBeGreaterThanOrEqual(1.01);
-      expect(adj).toBeLessThanOrEqual(1.01 * 4.0 + 0.01);
+  it('crashFromRPure is deterministic for identical snapshots', () => {
+    const snapA = new VolatilityEngine().getSnapshot();
+    const snapB = new VolatilityEngine().getSnapshot();
+    for (let i = 0; i < 50; i++) {
+      const r = draw(crypto.randomBytes(16).toString('hex'));
+      expect(VolatilityEngine.crashFromRPure(r, 0.01, snapA))
+        .toBe(VolatilityEngine.crashFromRPure(r, 0.01, snapB));
     }
   });
 
-  it('DOCUMENTED: player mix (behavior) changes crash outcomes for identical seeds', () => {
-    const neutral = new VolatilityEngine();
-    const tilted = new VolatilityEngine();
-    tilted.setPlayerMix({ tilted: 1 });
-    const hex = 'fffffffff0000fffffffffffffffffff'; // triggers tilted near-miss branch
-    expect(neutral.adjustCrash(5.0, hex)).not.toBe(tilted.adjustCrash(5.0, hex));
+  it('crash is always in [1.0, CRASH_CAP] for every regime', () => {
+    const states = ['CALM', 'TENSION', 'CHAOS', 'RESET'] as const;
+    for (const state of states) {
+      const snap = { ...new VolatilityEngine().getSnapshot(), state,
+        profile: VolatilityEngine.deriveProfile(state, {}, 1) };
+      for (const r of [0, 0.005, 0.01, 0.5, 0.999999, 1 - 2 ** -52]) {
+        const c = VolatilityEngine.crashFromRPure(r, 0.01, snap);
+        expect(c).toBeGreaterThanOrEqual(1.0);
+        expect(c).toBeLessThanOrEqual(CRASH_CAP);
+      }
+    }
   });
 
-  it('DOCUMENTED: elasticity from win/loss totals changes crash outcomes', () => {
+  it('a hostile committed profile cannot escape the economic bounds', () => {
+    const base = new VolatilityEngine().getSnapshot();
+    const hostile = { ...base, profile: { beta: 0.99, lambda: 100 } };
+    // even with beta=0.99 committed, the pure derivation re-clamps to BETA_MAX
+    for (const m of [1.2, 1.5, 2, 3, 5, 10]) {
+      // survival at m can never drop below the max-edge curve
+      const s = VolatilityEngine.theoreticalSurvival(m, 0.01, hostile);
+      expect(m * s).toBeGreaterThanOrEqual((1 - 0.01) * (1 - BETA_MAX) - 1e-12);
+      expect(m * s).toBeLessThanOrEqual(1 - 0.01 + 1e-12);
+    }
+  });
+
+  it('DOCUMENTED: player mix changes the committed profile (tilted ⇒ more edge)', () => {
+    const neutral = VolatilityEngine.deriveProfile('CALM', {}, 1);
+    const tilted = VolatilityEngine.deriveProfile('CALM', { tilted: 1 }, 1);
+    expect(tilted.beta).toBeGreaterThan(neutral.beta);
+    expect(tilted.beta).toBeLessThanOrEqual(BETA_MAX);
+  });
+
+  it('DOCUMENTED: elasticity from win/loss totals changes the committed shape only', () => {
     const a = new VolatilityEngine();
     const b = new VolatilityEngine();
     for (let i = 0; i < 20; i++) b.recordLoss(1_000); // heavy losses → elasticity > 1
-    const hex = '00000000000000000000000000000000';
     expect(b.getElasticity()).toBeGreaterThan(1);
-    expect(a.adjustCrash(2.0, hex)).not.toBe(b.adjustCrash(2.0, hex));
+    const pa = a.getSnapshot().profile;
+    const pb = b.getSnapshot().profile;
+    expect(pb.lambda).toBeLessThan(pa.lambda); // edge accrues later
+    expect(pb.beta).toBe(pa.beta); // total edge budget unchanged
   });
 });
 

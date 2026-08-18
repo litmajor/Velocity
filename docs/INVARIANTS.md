@@ -155,7 +155,7 @@ fairness:
     status: enforced
   - id: INV-F6
     statement: The full seed-to-final-crash mapping is reconstructible by an outside verifier from committed/published data.
-    enforced_by: blinded paramsCommit (sha256 over canonical shaping params + volatility snapshot + salt) published pre-bet, opened at crash; standalone verifier (fairness-engine/verifier.ts) recomputes the final crash via pure adjustCrashPure
+    enforced_by: blinded paramsCommit (sha256 over canonical shaping params + volatility snapshot + salt) published pre-bet, opened at crash; standalone verifier (fairness-engine/verifier.ts) recomputes the final crash via pure crashFromRPure
     test: test/fairness.test.ts (transparency suite - INV-F6 reconstruction, tamper detection, multi-round evolution)
     status: enforced
   - id: INV-F7
@@ -165,8 +165,30 @@ fairness:
     status: enforced
   - id: INV-F8
     statement: Verification is side-effect free - computeProof/computeCrashPoint never mutate volatility state, so audits cannot perturb future rounds.
-    enforced_by: adjustCrashPure is static/pure; tilt scheduling applied only inside allocateNextSeed
-    test: test/fairness.test.ts (no tilt-state mutation test)
+    enforced_by: crashFromRPure/deriveProfile are static/pure; snapshot resolved once inside allocateNextSeed
+    test: test/fairness.test.ts
+    status: enforced
+
+economic:
+  - id: INV-E1
+    statement: RTP(m) = m x P(crash >= m) lies in [(1-h)(1-BETA_MAX), 1-h] (= [0.9405, 0.99] at h=0.01) for EVERY multiplier m and EVERY committable configuration (regime, player mix, elasticity, exposure steering, shaping preset). No configuration is player-positive.
+    enforced_by: bounded EdgeProfile model - RTP(m) = (1-h)*phi(m) with beta clamped to [0, BETA_MAX] and h to [HOUSE_EDGE_MIN, HOUSE_EDGE_MAX] INSIDE crashFromRPure/theoreticalSurvival (docs/ECONOMICS.md section 1)
+    test: test/economics.test.ts (analytic log-spaced sweep of the whole multiplier range + empirical 4-sigma checks + hostile-snapshot clamping)
+    status: enforced
+  - id: INV-E2
+    statement: Volatility (regime, mix, elasticity, steering) changes only WHERE within the bounded band the edge accrues (distribution shape), never whether the game is player-positive; the crash point is never multiplied and the uniform draw is never warped.
+    enforced_by: all shaping funnels through deriveProfile into a committed {beta, lambda}; crashFromRPure is the exact inverse CDF of the committed distribution
+    test: test/economics.test.ts (monotonicity + empirical-vs-theory), test/fairness.test.ts
+    status: enforced
+  - id: INV-E3
+    statement: No strategy using only publicly observable state (regime, crash history, transitions) has expected return above 1-h per unit staked.
+    enforced_by: pointwise RTP ceiling (INV-E1) makes every bet a <=(1-h) expectation regardless of round/multiplier selection
+    test: test/economics.test.ts (11 adaptive strategies over a 150k-round stream with real regime evolution)
+    status: enforced
+  - id: INV-E4
+    statement: Instant-crash probability equals the committed house edge h exactly; cent-flooring and the 10000x cap only remove player value (house-favoring), never add it.
+    enforced_by: r < h instant-crash region in crashFromRPure; Math.floor to cents; CRASH_CAP truncation
+    test: test/economics.test.ts (distribution-properties suite)
     status: enforced
 
 recovery:
