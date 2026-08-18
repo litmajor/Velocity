@@ -37,9 +37,19 @@ wallet:
     status: enforced
   - id: INV-W7
     statement: Wallet state survives a process restart.
-    enforced_by: nothing (memory only)
-    test: test/recovery.test.ts (DEFECT test documents the gap)
-    status: documented-gap
+    enforced_by: append-only fsync'd write-ahead ledger (WalletLedger); state replayed on construction
+    test: test/wallet-ledger.test.ts, test/recovery.test.ts
+    status: enforced
+  - id: INV-W8b
+    statement: Every economic mutation has exactly one durable identity (tx id) and is applied at most once, in-process and across restarts.
+    enforced_by: appliedTx dedupe set rebuilt from the ledger; deterministic tx ids (payout:<betId>, refund:<betId>, reserve/commit/rollback:<resId>)
+    test: test/wallet-ledger.test.ts, test/recovery.test.ts
+    status: enforced
+  - id: INV-W9
+    statement: A committed reservation cannot commit again and a rolled-back reservation cannot roll back (or be reused) again, including after restart.
+    enforced_by: reservation removal is replayed from the ledger; reservation ids are single-use (reserve:<id> tx dedupe)
+    test: test/wallet-ledger.test.ts
+    status: enforced
 
 betting:
   - id: INV-B1
@@ -80,7 +90,7 @@ settlement:
     test: test/settlement.test.ts, test/recovery.test.ts
     status: enforced
   - id: INV-S2
-    statement: Every settled bet is terminal (CASHED_OUT or LOST), never both paid and refunded; LOST bets have payout 0.
+    statement: Every settled bet is terminal (CASHED_OUT, LOST or REFUNDED), never both paid and refunded; LOST/REFUNDED bets have payout 0.
     enforced_by: per-bet lock in settle(); resolved flag
     test: test/settlement.test.ts
     status: enforced
@@ -93,7 +103,12 @@ settlement:
     statement: Every accepted bet reaches a terminal state within its round's normal lifecycle.
     enforced_by: settle() marks all non-cashed bets LOST
     test: test/settlement.test.ts, test/lifecycle.test.ts
-    status: enforced (gap on mid-round process kill - see INV-R1)
+    status: enforced (mid-round process kills are resolved by startup recovery - see INV-R1)
+  - id: INV-S5
+    statement: A winning payout is credited exactly once; a failed credit leaves the winner durably identifiable (CASHED_OUT with payoutPaid unset) and retryable.
+    enforced_by: credit tx id payout:<betId> + durable payoutPaid marker on the bet; RecoveryEngine retries unpaid winners
+    test: test/recovery.test.ts (failed-credit injection, credit-then-crash boundary)
+    status: enforced
 
 lifecycle:
   - id: INV-L1
@@ -146,10 +161,25 @@ fairness:
 
 recovery:
   - id: INV-R1
-    statement: A process restart leaves the system economically consistent (no lost balances, no orphaned ACTIVE bets, no double settlement).
-    enforced_by: partial - bets/rounds persisted, settlement replay blocked via persisted SETTLED phase; wallet and in-flight round state are not recovered
+    statement: A process restart leaves the system economically consistent (no lost balances, no orphaned ACTIVE bets, no double settlement, no unpaid winners).
+    enforced_by: durable wallet ledger + RecoveryEngine startup pass (docs/RECOVERY.md policy - refund voided rounds, complete CRASHED rounds, retry unpaid payouts, reconcile reservations)
     test: test/recovery.test.ts
-    status: documented-gap (see AUDIT.md B-1/B-2)
+    status: enforced
+  - id: INV-R3
+    statement: Startup recovery is idempotent - running it N times produces the same economic state as running it once.
+    enforced_by: every recovery action conditioned on durable state (bet status, payoutPaid, reservation existence) and deterministic tx ids
+    test: test/recovery.test.ts (N-runs snapshot equality)
+    status: enforced
+  - id: INV-R4
+    statement: A corrupt persistence file is never treated as missing state - reads and recovery fail closed.
+    enforced_by: CorruptStateError from repositories; CorruptLedgerError for non-tail ledger corruption; torn ledger tail (unacknowledged append) is the only discarded data
+    test: test/recovery.test.ts, test/wallet-ledger.test.ts
+    status: enforced
+  - id: INV-R5
+    statement: Bet/round repository writes are atomic - a kill mid-write leaves the previous complete file, never a torn one, under the target name.
+    enforced_by: unique temp file + fsync + rename in writeFileAtomic; readers ignore *.tmp
+    test: test/recovery.test.ts
+    status: enforced
   - id: INV-R2
     statement: Event replay/duplication has no economic effect (funds move only through direct engine calls).
     enforced_by: economic paths are call-based; tick dedupe by (roundId, tickIndex)

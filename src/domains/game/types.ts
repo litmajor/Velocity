@@ -21,6 +21,9 @@ export interface RoundState {
     totalBets: number;
     totalLiability: number;
   };
+  // set by the startup RecoveryEngine when it force-settles an interrupted round
+  recovered?:      boolean;
+  recoveryAction?: string;
 }
 
 export type SystemState = 'CALM' | 'TENSION' | 'CHAOS' | 'RESET';
@@ -37,13 +40,17 @@ export interface Bet {
   roundId:             string;
   amount:              number;
   placedAt:            number;
-  status:              'ACTIVE' | 'CASHED_OUT' | 'LOST';
+  status:              'ACTIVE' | 'CASHED_OUT' | 'LOST' | 'REFUNDED';
   cashedOutAt?:        number;
   cashedOutMultiplier?: number;
   payout?:             number;
   autoCashout?:        number;
-  // resolved indicates the bet has been finalised (either CASHED_OUT or LOST)
+  // resolved indicates the bet has been finalised (CASHED_OUT, LOST or REFUNDED)
   resolved?:           boolean;
+  // durable link to the wallet reservation that captured the stake (`bet:<betId>`)
+  reservationId?:      string;
+  // set once the winning payout has been credited to the wallet (exactly-once marker)
+  payoutPaid?:         boolean;
 }
 
 export interface SettledBet {

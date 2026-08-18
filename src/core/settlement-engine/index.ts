@@ -45,14 +45,27 @@ export class SettlementEngine {
 
     for (const bet of bets) {
       if (bet.status === 'CASHED_OUT') {
-        // Credit winners now (payouts were recorded on cashout but not yet paid)
-        if (this.wallet && bet.payout) {
+        // Credit winners now (payouts were recorded on cashout but not yet paid).
+        // The credit carries the deterministic tx id `payout:<betId>` and the bet
+        // is durably marked payoutPaid, so any retry (in-process or after a
+        // restart) applies the money exactly once. A failed credit leaves the
+        // bet durably identifiable as an unpaid winner (payoutPaid unset) and
+        // is retried by startup recovery.
+        if (this.wallet && bet.payout && !bet.payoutPaid) {
           try {
             this.wallet.ensureAccount(bet.userId);
-            this.wallet.credit(bet.userId, bet.payout);
+            this.wallet.credit(bet.userId, bet.payout, `payout:${bet.betId}`);
+            bet.payoutPaid = true;
+            await this.bettingEngine.updateBet(bet);
           } catch (err) {
-            // if crediting fails, log and continue — system can retry or mark for manual review
             console.error('[Settlement] failed to credit', bet.userId, err);
+            eventBus.emit('EVENT_APPEND', {
+              envelope: {
+                event: 'PAYOUT_FAILED',
+                data: { betId: bet.betId, userId: bet.userId, payout: bet.payout, error: (err as Error).message },
+                timestamp: Date.now(),
+              },
+            });
           }
         }
 
@@ -64,6 +77,9 @@ export class SettlementEngine {
           multiplier: bet.cashedOutMultiplier,
           won:        true,
         });
+      } else if (bet.status === 'REFUNDED') {
+        // stake already returned by recovery — not a winner, not a loser
+        continue;
       } else {
         // ACTIVE bets that didn't cash out before crash → LOST
         // perform atomic update per-bet to avoid races with cashout
