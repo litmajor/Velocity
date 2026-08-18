@@ -232,6 +232,9 @@ export class WebSocketGameClient implements GameClient {
           totalBets: Number(d.totalBets ?? 0),
           totalPayout: Number(d.totalPayout ?? 0),
         });
+        // Payouts are credited by the settlement engine, not at cashout time,
+        // so the balance pushed on CASHOUT_ACCEPTED can be stale until now.
+        this.send('WALLET_SYNC', { userId: this.userId });
         return;
       case 'BET_PLACED':
         this.emit({
