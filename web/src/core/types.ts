@@ -72,8 +72,24 @@ export interface RoundView {
 
 export type ConnectionStatus = 'MOCK' | 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED';
 
+export interface SettledOutcome {
+  userId: string;
+  amount: number;
+  payout: number;
+  multiplier: number | null;
+}
+
+export interface RoundResults {
+  roundId: string;
+  winners: SettledOutcome[];
+  losers: SettledOutcome[];
+  totalBets: number;
+  totalPayout: number;
+}
+
 export interface GameView {
   now: number;
+  userId: string;
   connection: ConnectionStatus;
   round: RoundView;
   players: PlayerRow[];
@@ -81,11 +97,13 @@ export interface GameView {
   wallet: WalletView;
   fairness: FairnessView;
   myBet: MyBetView;
+  results: RoundResults | null;
   lastActionError: string | null;
 }
 
 export const initialGameView = (): GameView => ({
   now: 0,
+  userId: '',
   connection: 'MOCK',
   round: {
     roundId: null,
@@ -110,5 +128,6 @@ export const initialGameView = (): GameView => ({
     proofCrashPoint: null,
   },
   myBet: { status: 'NONE', stake: 0, autoCashout: null, cashedOutMultiplier: null, payout: null },
+  results: null,
   lastActionError: null,
 });

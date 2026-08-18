@@ -54,6 +54,7 @@ export class MockGameClient implements GameClient {
   }
 
   connect(): void {
+    this.emit({ type: 'IDENTITY_SET', userId: 'you' });
     this.emit({ type: 'CONNECTION_CHANGED', status: 'MOCK' });
     this.emit({ type: 'WALLET_BALANCE_UPDATED', balance: this.balance });
     this.pushTx('DEPOSIT', this.balance);

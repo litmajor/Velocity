@@ -1,10 +1,10 @@
 // WalletPanel: balance, active wager, available balance, recent transactions.
 // Render-only view over the backend-owned wallet (no second wallet system).
 
-import type { GameView } from '../../../core/types.js';
-import { fmtMoney, fmtTime } from '../../../core/format.js';
-import { el, panel } from '../../../ui/dom.js';
-import type { PanelView } from './game-surface.js';
+import type { GameView } from '../../core/types.js';
+import { fmtMoney, fmtTime } from '../../core/format.js';
+import { el, panel } from '../../ui/dom.js';
+import type { PanelView } from '../panel-view.js';
 
 export function createWalletPanel(): PanelView {
   const balanceEl = el('span', { class: 'stat-value big' }, '');

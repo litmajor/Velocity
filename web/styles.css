@@ -245,6 +245,69 @@ body {
 }
 .fair-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 
+/* Experience switcher */
+.exp-switch { display: flex; gap: 6px; margin-left: 8px; }
+.exp-switch-btn {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 2px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.exp-switch-btn.active { border-color: var(--accent); color: var(--accent); }
+
+/* Experience scenes (shared canvas chrome; per-experience theming below) */
+.scene-wrap { position: relative; margin-top: 6px; }
+.scene-canvas {
+  width: 100%;
+  height: 340px;
+  display: block;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.scene-readout { font-size: 56px; }
+.scene-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(11, 14, 20, 0.82);
+  border-radius: var(--radius);
+  text-align: center;
+  padding: 16px;
+}
+.scene-overlay.hidden { display: none; }
+.overlay-title { font-size: 20px; letter-spacing: 4px; color: var(--accent); font-weight: 700; }
+.overlay-line { color: var(--text-muted); font-size: 13px; }
+.overlay-row { font-family: var(--mono); font-size: 13px; }
+
+.event-log { list-style: none; margin: 6px 0 0; padding: 0; }
+.event-log-row {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--bg-inset);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+.event-log-row:first-child { color: var(--text); }
+
+/* Rocket theme: cool space palette */
+body[data-experience='rocket'] { --accent: #7aa2ff; }
+.exp-rocket .scene-canvas { background: #05060d; border-color: #1d2740; }
+.exp-rocket .overlay-title { color: #7aa2ff; }
+
+/* Racecar theme: hot tarmac palette */
+body[data-experience='racecar'] { --accent: #f4b942; }
+.exp-racecar .scene-canvas { background: #10141f; border-color: #3a3320; }
+.exp-racecar .overlay-title { color: #f4b942; }
+
 /* Responsive: tablet & mobile — game surface + bet controls first */
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; padding: 10px; }
