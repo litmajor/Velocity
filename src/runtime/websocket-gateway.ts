@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { eventBus } from './event-bus';
 import { EVENT_TIERS } from './event-tiers';
 import { ActionValidator } from './action-validator';
+import { timingSafeEqualStr } from './auth';
 import type { GameEvents, GameEventName } from '../domains/game';
 import type { GameEngine } from '../core/game-engine';
 import type { BettingService } from '../core/betting-service';
@@ -26,6 +27,7 @@ export class WebSocketGateway {
   private clients = new Set<ClientMeta>();
   private inflightActions = new Set<string>();
   private seenRequestIds = new Set<string>();
+  private timers: Array<ReturnType<typeof setInterval>> = [];
   private readonly REQUEST_ID_TTL_MS = 5 * 60 * 1000; // 5 minutes
   private readonly PRUNE_INTERVAL_MS = 60 * 1000; // 1 minute
 
@@ -38,8 +40,8 @@ export class WebSocketGateway {
     this.mirrorEvents();
     this.handleConnections();
     // periodically prune old requestIds to prevent unbounded memory growth
-    setInterval(() => this.pruneSeenRequestIds(), this.PRUNE_INTERVAL_MS);
-    setInterval(() => this.flushSnapshots(), FLUSH_INTERVAL_MS);
+    this.timers.push(setInterval(() => this.pruneSeenRequestIds(), this.PRUNE_INTERVAL_MS));
+    this.timers.push(setInterval(() => this.flushSnapshots(), FLUSH_INTERVAL_MS));
     console.log(`[WS] Gateway listening on ws://localhost:${port}`);
   }
 
@@ -97,7 +99,7 @@ export class WebSocketGateway {
 
       // If a server-side client token is configured, enforce it at connect time
       const requiredToken = process.env.WS_CLIENT_TOKEN;
-      if (requiredToken && token !== requiredToken) {
+      if (requiredToken && !timingSafeEqualStr(token, requiredToken)) {
         try { ws.close?.(4001, 'Unauthorized'); } catch {}
         return;
       }
@@ -184,9 +186,10 @@ export class WebSocketGateway {
         break;
       }
       case 'ADMIN': {
-        // Simple admin toggle — in prod validate token
+        // Fails closed: no WS_ADMIN_TOKEN configured means admin can never be
+        // granted; comparison is constant-time and rejects empty tokens.
         const token = String(payload.token ?? '');
-        if (token && token === process.env.WS_ADMIN_TOKEN) {
+        if (timingSafeEqualStr(token, process.env.WS_ADMIN_TOKEN)) {
           client.isAdmin = true;
           this.sendSafe(client, { type: 'ADMIN_OK', data: {} });
         } else {
@@ -254,5 +257,19 @@ export class WebSocketGateway {
 
   get connectedClients(): number {
     return this.clients.size;
+  }
+
+  address() {
+    return this.wss.address();
+  }
+
+  close(): void {
+    for (const t of this.timers) clearInterval(t);
+    this.timers = [];
+    for (const client of this.clients) {
+      try { client.ws.close(); } catch {}
+    }
+    this.clients.clear();
+    this.wss.close();
   }
 }

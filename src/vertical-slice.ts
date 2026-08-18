@@ -9,6 +9,8 @@ import { DebugSurface } from './surfaces/debug';
 import { WalletEngine } from './core/wallet-engine';
 import { FileBetRepository, FileRoundRepository } from './core/repositories';
 import { RecoveryEngine } from './core/recovery-engine';
+import { InstanceLock, InstanceLockError } from './runtime/instance-lock';
+import { SettlementClaimStore } from './core/repositories/settlement-claim';
 import type { BettingService } from './core/betting-service';
 import path from 'path';
 
@@ -16,6 +18,21 @@ import path from 'path';
 
 const bus = eventBus; // injectable bus for easier testing and isolation
 const dataDir = path.resolve(process.cwd(), process.env.DATA_DIR ?? 'data');
+
+// Single-writer deployment invariant: exactly one process may own a data
+// directory. All in-memory guards (settlement, wallet, seed chain, scheduler)
+// are only correct under this invariant, so it is enforced, not assumed.
+let instanceLock: InstanceLock;
+try {
+  instanceLock = InstanceLock.acquire(dataDir);
+} catch (err) {
+  if (err instanceof InstanceLockError) {
+    console.error(`[System] FATAL: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
+
 const roundRepo = new FileRoundRepository(path.join(dataDir, 'rounds'));
 const betRepo = new FileBetRepository(path.join(dataDir, 'bets'));
 const wallet = new WalletEngine({ ledgerPath: path.join(dataDir, 'wallet.ledger') });
@@ -23,7 +40,10 @@ const wallet = new WalletEngine({ ledgerPath: path.join(dataDir, 'wallet.ledger'
 const gameEngine = new GameEngine(bus, undefined, roundRepo);
 const bettingEngine = new BettingEngine(gameEngine, wallet, betRepo);
 const bettingService: BettingService = bettingEngine;
-const settlementEngine = new SettlementEngine(gameEngine, bettingService, wallet, roundRepo);
+const settlementEngine = new SettlementEngine(
+  gameEngine, bettingService, wallet, roundRepo,
+  new SettlementClaimStore(path.join(dataDir, 'settlements')),
+);
 const scheduler = new RoundScheduler(gameEngine, bettingService, settlementEngine, { maxRounds: 10 });
 const wsGateway = new WebSocketGateway(3001, gameEngine, bettingService);
 const debugSurface = new DebugSurface(gameEngine, bettingService, { mode: 'auto' });
@@ -154,6 +174,7 @@ async function gracefulShutdown() {
   } catch (err) {
     console.error('[Shutdown error]', err);
   }
+  try { instanceLock.release(); } catch (e) {}
   process.exit(0);
 }
 

@@ -2,12 +2,36 @@ import http from 'http';
 import { GameEngine } from '../core/game-engine';
 import type { BettingService } from '../core/betting-service';
 import { ExposureEngine } from '../core/exposure-engine';
+import { timingSafeEqualStr } from './auth';
+
+/** Constant-time bearer-token check; malformed/absent headers fail closed. */
+export function isAuthorized(header: string | undefined, expected: string): boolean {
+  if (!header || !header.startsWith('Bearer ')) return false;
+  return timingSafeEqualStr(header.slice('Bearer '.length), expected);
+}
 
 export function startAdminServer(port: number, gameEngine: GameEngine, bettingEngine: BettingService) {
   const exposure = new ExposureEngine();
+  const adminToken = process.env.ADMIN_TOKEN;
   const server = http.createServer(async (req, res) => {
     const url = req.url || '/';
     const method = req.method ?? 'GET';
+
+    // Fail closed: every admin route requires a configured token and a valid
+    // Authorization header. Without ADMIN_TOKEN the surface is disabled
+    // entirely — there is no unauthenticated mode.
+    if (!adminToken) {
+      res.statusCode = 503;
+      res.end('admin surface disabled (ADMIN_TOKEN not configured)');
+      return;
+    }
+    if (!isAuthorized(req.headers.authorization, adminToken)) {
+      res.statusCode = 401;
+      res.setHeader('www-authenticate', 'Bearer');
+      res.end('unauthorized');
+      return;
+    }
+
     // POST endpoint to update playerMixParams
     if (url === '/admin/player-mix-params' && method === 'POST') {
       try {

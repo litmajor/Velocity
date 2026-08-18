@@ -69,8 +69,18 @@ export class WalletLedger {
   /** Durably append one record (write + fsync) before the caller mutates memory. */
   append(record: LedgerRecord): void {
     if (this.fd === null) {
-      fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+      const dir = path.dirname(this.filePath);
+      fs.mkdirSync(dir, { recursive: true });
+      const created = !fs.existsSync(this.filePath);
       this.fd = fs.openSync(this.filePath, 'a');
+      if (created) {
+        // make the new file's directory entry durable: without this, power
+        // loss can lose the whole ledger file even though appends are fsync'd
+        try {
+          const dfd = fs.openSync(dir, 'r');
+          try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+        } catch {}
+      }
     }
     const line = JSON.stringify(record) + '\n';
     fs.writeSync(this.fd, line, null, 'utf8');
