@@ -90,6 +90,7 @@ export class GameEngine {
       phase: 'BETTING',
       serverSeed: alloc.serverSeed,
       serverHash: alloc.serverHash,
+      paramsCommit: alloc.paramsCommit,
       clientSeed: alloc.clientSeed,
       nonce: alloc.nonce,
       crashPoint: alloc.crashPoint,
@@ -103,6 +104,7 @@ export class GameEngine {
       roundId: this.state.roundId,
       roundNumber: this.state.roundNumber,
       serverHash: this.state.serverHash, // ← published; seed stays hidden
+      paramsCommit: this.state.paramsCommit, // ← blinded commit of the crash mapping
       bettingEndsAt: this.state.bettingEndsAt,
       clientSeed: this.state.clientSeed,
       nonce: this.state.nonce,
@@ -244,12 +246,22 @@ export class GameEngine {
         // sync state serverSeed with revealed value (defence-in-depth)
         s.serverSeed = reveal.serverSeed;
         s.serverHash = reveal.serverHash ?? s.serverHash;
+        // persist the opening of the pre-bet params commitment for offline audits
+        if (reveal.paramsSalt !== undefined) {
+          s.fairnessReveal = {
+            shapingParams: reveal.shapingParams,
+            volatilitySnapshot: reveal.volatilitySnapshot,
+            paramsSalt: reveal.paramsSalt,
+          };
+        }
 
-        // Compute a detailed proof object so clients/auditors can verify how
-        // the crash point was derived from the revealed seed and published
-        // parameters (clientSeed + nonce).
+        // Publish the proof recorded at allocation time so clients/auditors can
+        // verify how the crash point was derived from the revealed seed and the
+        // parameters in force at commitment (clientSeed + nonce). Recomputing it
+        // here would use current shaping/volatility state and could desync from
+        // the actual crashPoint.
         try {
-          const proof = (this.fairness as any).computeProof?.(s.serverSeed, s.clientSeed, s.nonce) ?? null;
+          const proof = (reveal as any).proof ?? (this.fairness as any).computeProof?.(s.serverSeed, s.clientSeed, s.nonce) ?? null;
           this.bus.emit('ROUND_CRASHED', {
             roundId: s.roundId,
             roundNumber: s.roundNumber,
@@ -259,6 +271,12 @@ export class GameEngine {
             clientSeed: s.clientSeed,
             nonce: s.nonce,
             proof,
+            // opening of the pre-bet paramsCommit: everything an outside
+            // verifier needs to recompute the final crash point
+            paramsCommit: s.paramsCommit,
+            paramsSalt: reveal.paramsSalt,
+            shapingParams: reveal.shapingParams,
+            volatilitySnapshot: reveal.volatilitySnapshot,
           } as any);
         } catch (e) {
           // fallback to minimal reveal if proof computation fails

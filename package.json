@@ -6,7 +6,12 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "dev": "npx tsx src/vertical-slice.ts",
-    "test": "npx tsx test/run-tests.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:legacy": "npx tsx test/run-tests.ts",
+    "rtp:study": "npx tsx scripts/rtp-study.ts",
+    "web:build": "tsc -p web",
+    "web:dev": "npm run web:build && npx tsx scripts/serve-web.ts",
     "start": "node dist/vertical-slice.js",
     "lint": "echo \"No linter configured\" && exit 0"
   },
@@ -17,7 +22,8 @@
     "@types/node": "^25.9.2",
     "ts-node": "^10.9.2",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "ws": "^8.21.0"
