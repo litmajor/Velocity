@@ -37,7 +37,7 @@ export class FairnessEngine {
   // Seed chain (hash ladder). Each entry is an unrevealed secret and salt for a future round.
   // The published commit for a round is `hash(secret)`; the revealed value is `secret`.
   private chain: Array<{ secret: string; salt: string }> = [];
-  private allocated = new Map<string, { secret: string; salt?: string; commit: string; index: number }>();
+  private allocated = new Map<string, { secret: string; salt?: string; commit: string; index: number; proof: CrashProof }>();
   // per-round nonce tracking for deterministic nonces
   private roundNonces = new Map<string, number>();
   // track used commits to prevent seed reuse attacks
@@ -146,8 +146,13 @@ export class FairnessEngine {
     const index = Date.now();
     const clientSeed = externalClientSeed ?? crypto.randomBytes(8).toString('hex');
     const nonce = this.nextNonce(roundId);
-    const crashPoint = this.computeCrashPoint(secret, clientSeed, nonce);
-    this.allocated.set(roundId, { secret, salt, commit, index });
+    // Compute the proof exactly once, at commitment time. The stored proof is
+    // the authoritative record of how this round's crashPoint was derived and
+    // is returned verbatim at reveal, so later shaping-param or volatility
+    // state changes cannot desynchronize the published proof from the outcome.
+    const proof = this.computeProof(secret, clientSeed, nonce);
+    const crashPoint = proof.adjusted;
+    this.allocated.set(roundId, { secret, salt, commit, index, proof });
     this.usedCommits.add(commit);
     // persist used commits so seed reuse survives restarts
     void this.saveState();
@@ -160,7 +165,7 @@ export class FairnessEngine {
     const entry = this.allocated.get(roundId);
     if (!entry) throw new Error(`no allocated seed for round ${roundId}`);
     this.allocated.delete(roundId);
-    return { serverSeed: entry.secret, serverHash: entry.commit, salt: entry.salt } as any;
+    return { serverSeed: entry.secret, serverHash: entry.commit, salt: entry.salt, proof: entry.proof } as any;
   }
 
   // Record a round result so the volatility engine can update state.

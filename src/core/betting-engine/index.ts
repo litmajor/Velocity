@@ -26,6 +26,7 @@ export class BettingEngine {
   private userRound = new Map<string, string>();      // `${userId}:${roundId}` → betId
   private roundBets = new Map<string, Set<string>>(); // roundId → Set<betId>
   private inflightCashouts = new Map<string, Promise<Bet>>(); // `${roundId}:${userId}` -> Promise
+  private pendingBets = new Set<string>(); // `${userId}:${roundId}` claimed synchronously to serialize duplicate submissions
   // per-bet async locks to enforce atomic updates
   private betLocks = new Map<string, Promise<void>>();
 
@@ -66,7 +67,7 @@ export class BettingEngine {
 
   private multiplierHandler = async (data: GameEvents['MULTIPLIER_UPDATED']) => {
     const { roundId, multiplier, tickIndex } = data as any;
-    const id = `${roundId}:${tickIndex ?? '0'}`;
+    const id = `auto:${roundId}:${tickIndex ?? '0'}`;
     if (this.processedEvents.has(id)) return;
     this.processedEvents.add(id);
     const betIds = Array.from(this.roundBets.get(roundId) ?? []);
@@ -84,7 +85,7 @@ export class BettingEngine {
     try {
       const { roundId, multiplier, ts, tickIndex } = data as { roundId: string; multiplier: number; ts?: number; tickIndex?: number };
       const idx = typeof tickIndex === 'number' ? tickIndex : Math.floor((ts ?? Date.now()) / this.TICK_LEDGER_MAX);
-      const id = `${roundId}:${idx}`;
+      const id = `tick:${roundId}:${idx}`;
       if (this.processedEvents.has(id)) return;
       this.processedEvents.add(id);
       if (this.processedEvents.size > this.PROCESSED_EVENTS_MAX) {
@@ -150,13 +151,44 @@ export class BettingEngine {
       throw new Error(reason);
     }
 
-    if (amount <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       const reason = 'Bet amount must be positive';
       eventBus.emit('BET_REJECTED', { roundId: state.roundId, userId, reason });
       throw new Error(reason);
     }
 
-    // check existing bet for user in this round
+    // Quantize the stake to cents so the recorded bet amount always equals the
+    // amount actually reserved/debited (sub-cent amounts cannot mint payouts).
+    const stake = Math.round(amount * 100) / 100;
+    if (stake < 0.01) {
+      const reason = 'Bet amount below minimum (0.01)';
+      eventBus.emit('BET_REJECTED', { roundId: state.roundId, userId, reason });
+      throw new Error(reason);
+    }
+
+    // Claim the (user, round) slot synchronously so concurrent duplicate
+    // submissions cannot interleave past the async repository check.
+    const dupKey = `${userId}:${state.roundId}`;
+    if (this.pendingBets.has(dupKey) || this.userRound.has(dupKey)) {
+      const reason = 'Already have an active bet this round';
+      eventBus.emit('BET_REJECTED', { roundId: state.roundId, userId, reason });
+      throw new Error(reason);
+    }
+    this.pendingBets.add(dupKey);
+    try {
+      return await this.placeBetInner(userId, stake, state, dupKey);
+    } finally {
+      this.pendingBets.delete(dupKey);
+    }
+  }
+
+  private async placeBetInner(
+    userId: string,
+    amount: number,
+    state: NonNullable<ReturnType<GameEngine['getState']>>,
+    dupKey: string,
+  ): Promise<Bet> {
+    // check existing bet for user in this round (durable duplicate check)
     const existing = (await this.repo.listByRound(state.roundId)).find(b => b.userId === userId && b.status === 'ACTIVE');
     if (existing) {
       const reason = 'Already have an active bet this round';
@@ -195,7 +227,7 @@ export class BettingEngine {
     }
     // Maintain in-memory authoritative indexes immediately after persistence
     this.bets.set(bet.betId, bet);
-    this.userRound.set(`${userId}:${state.roundId}`, bet.betId);
+    this.userRound.set(dupKey, bet.betId);
     const set = this.roundBets.get(state.roundId) ?? new Set<string>();
     set.add(bet.betId);
     this.roundBets.set(state.roundId, set);
@@ -266,6 +298,14 @@ export class BettingEngine {
 
       // Acquire per-bet lock to make cashout atomic with settlement
       return await this.withBetLock(betId, async () => {
+        // Re-check the phase now that we hold the lock: the round may have
+        // crashed while this cashout was queued behind another operation.
+        const phaseNow = this.gameEngine.getPhase();
+        if (phaseNow !== 'RUNNING') {
+          const reason = `Cannot cashout during ${phaseNow}`;
+          eventBus.emit('CASHOUT_REJECTED', { userId, reason });
+          throw new Error(reason);
+        }
         // read authoritative in-memory bet
         let fresh = this.bets.get(betId) ?? null;
         if (!fresh) {
@@ -340,7 +380,7 @@ export class BettingEngine {
     })();
 
     this.inflightCashouts.set(key, promise);
-    promise.finally(() => this.inflightCashouts.delete(key));
+    promise.finally(() => this.inflightCashouts.delete(key)).catch(() => {});
     return promise;
   }
 

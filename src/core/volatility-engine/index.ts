@@ -148,7 +148,9 @@ export class VolatilityEngine {
     // If a tilt sequence was requested previously, force a sharp low crash now
     if (this.tiltNextLow) {
       this.tiltNextLow = false;
-      const low = 1.01 + Math.random() * 0.2; // deterministic-ish fallback if entropy missing
+      const lowSlice = hexEntropy.slice(21, 25) || '0';
+      const lowU = (parseInt(lowSlice, 16) % 1000) / 1000;
+      const low = 1.01 + lowU * 0.2;
       return Math.max(1.01, Math.floor(low * 100) / 100);
     }
 

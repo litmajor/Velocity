@@ -9,6 +9,9 @@ import type { RoundRepository } from '../repositories/round-repository';
 // ─── SettlementEngine ─────────────────────────────────────────────────────────
 
 export class SettlementEngine {
+  // rounds already settled by this instance (durable check via roundRepo below)
+  private settledRounds = new Set<string>();
+
   constructor(
     private gameEngine:    GameEngine,
     private bettingEngine: BettingService,
@@ -22,6 +25,19 @@ export class SettlementEngine {
     if (!state || (state.phase !== 'CRASHED' && state.phase !== 'SETTLED')) {
       throw new Error(`settle: expected CRASHED/SETTLED phase, got ${state?.phase ?? 'null'}`);
     }
+
+    // Idempotency guard: a round must never be settled (and paid out) twice.
+    if (this.settledRounds.has(state.roundId)) {
+      throw new Error(`settle: round ${state.roundId} already settled`);
+    }
+    if (this.roundRepo) {
+      const persisted = await this.roundRepo.get(state.roundId);
+      if (persisted?.phase === 'SETTLED') {
+        this.settledRounds.add(state.roundId);
+        throw new Error(`settle: round ${state.roundId} already settled`);
+      }
+    }
+    this.settledRounds.add(state.roundId);
 
     const bets    = await this.bettingEngine.getBetsForRound(state.roundId);
     const winners: SettledBet[] = [];

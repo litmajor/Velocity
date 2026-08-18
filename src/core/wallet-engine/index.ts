@@ -14,8 +14,10 @@ export class WalletEngine {
   debit(userId: string, amount: number): void {
     if (!Number.isFinite(amount) || amount <= 0) throw new Error('invalid debit amount');
     const rounded = Math.round(amount * 100) / 100;
+    if (rounded < 0.01) throw new Error('invalid debit amount (below 0.01)');
     const current = this.getBalance(userId);
-    if (current < rounded) throw new Error('insufficient funds');
+    const reserved = this.reservedTotals.get(userId) ?? 0;
+    if (current - reserved < rounded) throw new Error('insufficient funds');
     this.balances.set(userId, Math.round((current - rounded) * 100) / 100);
   }
 
@@ -25,6 +27,7 @@ export class WalletEngine {
     this.ensureAccount(userId);
     if (this.reservations.has(id)) throw new Error('reservation id in use');
     const rounded = Math.round(amount * 100) / 100;
+    if (rounded < 0.01) throw new Error('invalid reserve amount (below 0.01)');
     const current = this.getBalance(userId);
     const reserved = this.reservedTotals.get(userId) ?? 0;
     if (current - reserved < rounded) throw new Error('insufficient funds (after reservations)');
@@ -57,6 +60,7 @@ export class WalletEngine {
   credit(userId: string, amount: number): void {
     if (!Number.isFinite(amount) || amount <= 0) throw new Error('invalid credit amount');
     const rounded = Math.round(amount * 100) / 100;
+    if (rounded < 0.01) throw new Error('invalid credit amount (below 0.01)');
     const current = this.getBalance(userId);
     this.balances.set(userId, Math.round((current + rounded) * 100) / 100);
   }
