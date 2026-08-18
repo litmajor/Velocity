@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import type { RoundState } from '../../domains/game';
+import { writeFileAtomic, readJsonFailClosed } from './atomic-json';
 
 export interface RoundRepository {
   save(round: RoundState): Promise<void>;
@@ -42,32 +43,23 @@ export class FileRoundRepository implements RoundRepository {
 
   async save(round: RoundState): Promise<void> {
     await this.ensureDir();
-    await fs.writeFile(this.filePath(round.roundId), JSON.stringify(round, null, 2), 'utf8');
+    await writeFileAtomic(this.filePath(round.roundId), JSON.stringify(round, null, 2));
   }
 
   async get(roundId: string): Promise<RoundState | null> {
-    try {
-      const raw = await fs.readFile(this.filePath(roundId), 'utf8');
-      return JSON.parse(raw) as RoundState;
-    } catch (err) {
-      return null;
-    }
+    return readJsonFailClosed<RoundState>(this.filePath(roundId));
   }
 
   async list(): Promise<RoundState[]> {
-    try {
-      await this.ensureDir();
-      const files = await fs.readdir(this.dir);
-      const out: RoundState[] = [];
-      for (const f of files) {
-        if (!f.endsWith('.json')) continue;
-        const raw = await fs.readFile(path.join(this.dir, f), 'utf8');
-        out.push(JSON.parse(raw) as RoundState);
-      }
-      return out;
-    } catch (err) {
-      return [];
+    await this.ensureDir();
+    const files = await fs.readdir(this.dir);
+    const out: RoundState[] = [];
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue; // ignores leftover .tmp from interrupted replaces
+      const r = await readJsonFailClosed<RoundState>(path.join(this.dir, f));
+      if (r) out.push(r);
     }
+    return out;
   }
 
   async remove(roundId: string): Promise<void> {

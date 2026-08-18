@@ -1,6 +1,9 @@
 import fs from 'fs/promises';
 import path from 'path';
 import type { Bet } from '../../domains/game';
+import { writeFileAtomic, readJsonFailClosed, CorruptStateError } from './atomic-json';
+
+export { CorruptStateError };
 
 export interface BetRepository {
   save(bet: Bet): Promise<void>;
@@ -52,50 +55,31 @@ export class FileBetRepository implements BetRepository {
 
   async save(bet: Bet): Promise<void> {
     await this.ensureDir();
-    await fs.writeFile(this.filePath(bet.betId), JSON.stringify(bet, null, 2), 'utf8');
+    await writeFileAtomic(this.filePath(bet.betId), JSON.stringify(bet, null, 2));
   }
 
   async get(betId: string): Promise<Bet | null> {
-    try {
-      const raw = await fs.readFile(this.filePath(betId), 'utf8');
-      return JSON.parse(raw) as Bet;
-    } catch {
-      return null;
+    return readJsonFailClosed<Bet>(this.filePath(betId));
+  }
+
+  async list(): Promise<Bet[]> {
+    await this.ensureDir();
+    const files = await fs.readdir(this.dir);
+    const out: Bet[] = [];
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue; // ignores leftover .tmp from interrupted replaces
+      const b = await readJsonFailClosed<Bet>(path.join(this.dir, f));
+      if (b) out.push(b);
     }
+    return out;
   }
 
   async listByRound(roundId: string): Promise<Bet[]> {
-    try {
-      await this.ensureDir();
-      const files = await fs.readdir(this.dir);
-      const out: Bet[] = [];
-      for (const f of files) {
-        if (!f.endsWith('.json')) continue;
-        const raw = await fs.readFile(path.join(this.dir, f), 'utf8');
-        const b = JSON.parse(raw) as Bet;
-        if (b.roundId === roundId) out.push(b);
-      }
-      return out;
-    } catch {
-      return [];
-    }
+    return (await this.list()).filter(b => b.roundId === roundId);
   }
 
   async listByUser(userId: string): Promise<Bet[]> {
-    try {
-      await this.ensureDir();
-      const files = await fs.readdir(this.dir);
-      const out: Bet[] = [];
-      for (const f of files) {
-        if (!f.endsWith('.json')) continue;
-        const raw = await fs.readFile(path.join(this.dir, f), 'utf8');
-        const b = JSON.parse(raw) as Bet;
-        if (b.userId === userId) out.push(b);
-      }
-      return out;
-    } catch {
-      return [];
-    }
+    return (await this.list()).filter(b => b.userId === userId);
   }
 
   async update(bet: Bet): Promise<void> {

@@ -55,15 +55,21 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each confirmed finding
 - D-3: The final `adjusted` crash point depends on hidden VolatilityEngine state and is not reconstructible from committed data alone; only `baseCrash` is independently verifiable (`fairness.test.ts` hidden-state test).
 - D-4: `startBetting()` while CRASHED auto-recovers (unsettled rounds are abandoned, not settled).
 
-### Bounded risks (not fixed; smallest fix would be a design change)
+### Bounded risks
 
-- B-1 (High for production): **Wallet is memory-only** — all balances and reservations vanish on restart (`recovery.test.ts`). Bets/rounds persist; money does not.
-- B-2 (High for production): **No startup recovery** — a kill mid-round orphans ACTIVE bets forever; stake already debited; no code path settles them after restart (`recovery.test.ts`).
-- B-3: `FileBetRepository`/`FileRoundRepository` write with a single non-atomic `writeFile` (no temp+rename, unlike `saveJSON`); torn writes are silently treated as missing records (`recovery.test.ts` torn-write test).
+> **Update (persistence hardening phase):** B-1, B-2, B-3 and B-7 are now FIXED.
+> - B-1: wallet state is durable via an append-only fsync'd write-ahead ledger (`src/core/wallet-engine/ledger.ts`); balances, reservations and per-mutation tx ids are replayed on construction (`test/wallet-ledger.test.ts`).
+> - B-2: an explicit, idempotent startup recovery pass (`src/core/recovery-engine`) refunds/settles interrupted rounds per the documented policy in `docs/RECOVERY.md` and reconciles wallet reservations (`test/recovery.test.ts`).
+> - B-3: bet/round writes are atomic (unique temp file + fsync + rename); corrupt files fail closed with `CorruptStateError` instead of reading as missing.
+> - B-7: winner payouts carry the deterministic tx id `payout:<betId>` plus a durable `payoutPaid` marker; failed credits stay durably identifiable and are retried exactly-once by recovery.
+
+- ~~B-1 (High for production): **Wallet is memory-only**~~ — FIXED, see above.
+- ~~B-2 (High for production): **No startup recovery**~~ — FIXED, see above.
+- ~~B-3: non-atomic `writeFile` in `FileBetRepository`/`FileRoundRepository`~~ — FIXED, see above.
 - B-4: Synchronous event bus — one throwing subscriber breaks delivery to later subscribers with no isolation/retry (`event-ordering.test.ts`). Economic effects flow through direct calls, so replayed events move no funds, but UI/audit consumers can silently miss events.
 - B-5: Tick ledger appends by arrival order; a late out-of-order tick becomes "latest" and would price the next cashout (`event-ordering.test.ts` DOCUMENTED). Single-process today (bus is in-proc, ordered), becomes real if ticks ever cross a network.
 - B-6: `GameEngine.reset()` has no phase guard — a mid-RUNNING reset orphans active bets (`lifecycle.test.ts` BOUNDED RISK). Only the scheduler calls it today.
-- B-7: Settlement credit failure leaves a CASHED_OUT-but-unpaid bet with only a console log; no durable retry queue.
+- ~~B-7: Settlement credit failure leaves a CASHED_OUT-but-unpaid bet with only a console log~~ — FIXED, see above.
 - B-8: ExposureEngine assumes 100× liability for open bets without auto-cashout — conservative but crude; steering can trigger on a single 200-unit bet.
 
 ### False positives / verified-correct properties
@@ -85,6 +91,7 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow. Each confirmed finding
 
 - Runner: **Vitest 4** (`npm test` → `vitest run`; deterministic: fake timers, fixed-crash fairness stub, seeded LCG for property tests, forked single-file pool because engines share the singleton bus and `data/`).
 - 8 files, **70 tests, 70 passing, 0 failing, 0 skipped** (stable across 5 runs). Legacy harness kept as `npm run test:legacy`.
+- After the persistence hardening phase: 9 files, **94 tests, 94 passing** — added `wallet-ledger.test.ts` (durable ledger properties) and rewrote `recovery.test.ts` (the former DEFECT/DOCUMENTED-gap tests now assert the fixed behavior: restart survival, crash-point recovery, exactly-once payouts/refunds, atomicity, fail-closed corruption, recovery idempotency).
 - Coverage is invariant-driven, not line-driven: races (`betting-races`), wallet properties (`wallet`), monetary edges (`monetary-edges`), settlement (`settlement`), lifecycle (`lifecycle`), fairness+verifier (`fairness`), restart/persistence (`recovery`), event ordering (`event-ordering`).
 - Intentionally not automated: real process-kill during a syscall (torn write simulated instead); WS transport delay tests (gateway logic covered at engine level, where the economic guarantees live).
 
@@ -104,7 +111,7 @@ See `docs/INVARIANTS.md` (machine-readable YAML-style list; each invariant maps 
 
 ## 7. Recommended next phase (priority order, from findings)
 
-1. **Persistence hardening** (B-1/B-2/B-3/B-7): durable wallet ledger (append-only journal or SQLite), startup recovery that settles/refunds orphaned rounds, atomic repo writes, durable payout retry. This is the only blocker-class gap left.
+1. ~~**Persistence hardening** (B-1/B-2/B-3/B-7)~~ — DONE: durable wallet write-ahead ledger, idempotent startup recovery, atomic repo writes, durable payout retry (`docs/RECOVERY.md`).
 2. **Fairness transparency** (D-1..D-3, U-1): publish volatility state in the commitment or remove `adjustCrash`; run an RTP simulation. Decide the trust model before any real-money exposure.
 3. **Monitoring/observability** (B-4/B-7): isolate event-bus subscribers, alert on settlement credit failures and invariant violations.
 4. **Player-facing UI / deployment**: last — the engine is now internally consistent under the tested adversarial conditions, but 1–2 are prerequisites for production.

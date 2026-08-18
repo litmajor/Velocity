@@ -196,9 +196,12 @@ export class BettingEngine {
       throw new Error(reason);
     }
 
-    // ensure user has an account and reserve funds (reservation by resId)
+    // ensure user has an account and reserve funds. The reservation id is
+    // derived from the betId so startup recovery can link an orphaned
+    // reservation back to its bet (or lack of one) after a process failure.
     this.wallet.ensureAccount(userId);
-    const resId = 'res:' + crypto.randomUUID();
+    const betId = crypto.randomUUID();
+    const resId = `bet:${betId}`;
     try {
       this.wallet.reserve(userId, amount, resId);
     } catch (err) {
@@ -208,12 +211,13 @@ export class BettingEngine {
     }
 
     const bet: Bet = {
-      betId:    crypto.randomUUID(),
+      betId,
       userId,
       roundId:  state.roundId,
       amount,
       placedAt: Date.now(),
       status:   'ACTIVE',
+      reservationId: resId,
     } as Bet;
 
     try {
@@ -231,8 +235,9 @@ export class BettingEngine {
     const set = this.roundBets.get(state.roundId) ?? new Set<string>();
     set.add(bet.betId);
     this.roundBets.set(state.roundId, set);
-    // commit reservation (resId)
-    try { this.wallet.commit(resId); } catch (e) {}
+    // commit reservation (resId); on failure the open reservation is
+    // reconciled by startup recovery (bet exists -> commit)
+    try { this.wallet.commit(resId); } catch (e) { console.error('[Betting] commit failed for', resId, e); }
     try { this.userBehavior.recordBet(userId, amount); } catch (e) {}
 
     eventBus.emit('BET_PLACED', {

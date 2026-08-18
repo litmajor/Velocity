@@ -7,15 +7,18 @@ import { SettlementEngine } from './core/settlement-engine';
 import { WebSocketGateway } from './runtime/websocket-gateway';
 import { DebugSurface } from './surfaces/debug';
 import { WalletEngine } from './core/wallet-engine';
-import { InMemoryBetRepository, InMemoryRoundRepository } from './core/repositories';
+import { FileBetRepository, FileRoundRepository } from './core/repositories';
+import { RecoveryEngine } from './core/recovery-engine';
 import type { BettingService } from './core/betting-service';
+import path from 'path';
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 const bus = eventBus; // injectable bus for easier testing and isolation
-const roundRepo = new InMemoryRoundRepository();
-const betRepo = new InMemoryBetRepository();
-const wallet = new WalletEngine();
+const dataDir = path.resolve(process.cwd(), process.env.DATA_DIR ?? 'data');
+const roundRepo = new FileRoundRepository(path.join(dataDir, 'rounds'));
+const betRepo = new FileBetRepository(path.join(dataDir, 'bets'));
+const wallet = new WalletEngine({ ledgerPath: path.join(dataDir, 'wallet.ledger') });
 
 const gameEngine = new GameEngine(bus, undefined, roundRepo);
 const bettingEngine = new BettingEngine(gameEngine, wallet, betRepo);
@@ -113,12 +116,27 @@ bus.on('ROUND_SETTLED', () => {
   }
 });
 
-// start services
-debugSurface.start();
-scheduler.start().catch(err => {
-  console.error('[System] Scheduler fatal error:', err);
-  process.exit(1);
-});
+// start services — startup recovery MUST complete before new rounds begin
+const recovery = new RecoveryEngine(wallet, betRepo, roundRepo);
+recovery.recover()
+  .then(report => {
+    console.log('[Recovery]', {
+      roundsRecovered: report.roundsRecovered.length,
+      betsRefunded: report.betsRefunded.length,
+      betsMarkedLost: report.betsMarkedLost.length,
+      payoutsPaid: report.payoutsPaid.length,
+      reservationsCommitted: report.reservationsCommitted.length,
+      reservationsRolledBack: report.reservationsRolledBack.length,
+      failures: report.failures,
+    });
+    debugSurface.start();
+    return scheduler.start();
+  })
+  .catch(err => {
+    // fail closed: corrupt persisted state must not be played through
+    console.error('[System] Startup recovery / scheduler fatal error:', err);
+    process.exit(1);
+  });
 
 // graceful shutdown
 let shuttingDown = false;
