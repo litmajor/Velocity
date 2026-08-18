@@ -245,11 +245,13 @@ export class GameEngine {
         s.serverSeed = reveal.serverSeed;
         s.serverHash = reveal.serverHash ?? s.serverHash;
 
-        // Compute a detailed proof object so clients/auditors can verify how
-        // the crash point was derived from the revealed seed and published
-        // parameters (clientSeed + nonce).
+        // Publish the proof recorded at allocation time so clients/auditors can
+        // verify how the crash point was derived from the revealed seed and the
+        // parameters in force at commitment (clientSeed + nonce). Recomputing it
+        // here would use current shaping/volatility state and could desync from
+        // the actual crashPoint.
         try {
-          const proof = (this.fairness as any).computeProof?.(s.serverSeed, s.clientSeed, s.nonce) ?? null;
+          const proof = (reveal as any).proof ?? (this.fairness as any).computeProof?.(s.serverSeed, s.clientSeed, s.nonce) ?? null;
           this.bus.emit('ROUND_CRASHED', {
             roundId: s.roundId,
             roundNumber: s.roundNumber,
