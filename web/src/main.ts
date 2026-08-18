@@ -6,7 +6,8 @@
 // store, client, and connection are untouched.
 //
 // Config (URL query params):
-//   ?experience=rocket|racecar   presentation (default rocket, persisted)
+//   ?experience=rocket|racecar|terminal|command-center
+//                                presentation (default rocket, persisted)
 //   ?user=<id>                   player id (default persisted random guest id)
 //   ?ws=<url>                    gateway url (default ws://<host>:3001)
 //   ?mock=1                      explicit opt-in to the offline demo simulator
@@ -18,22 +19,31 @@ import { MockGameClient } from './runtime/mock-game-client.js';
 import { installAutoCashout } from './actions/auto-cashout.js';
 import { mountRocketExperience } from './experiences/rocket/index.js';
 import { mountRacecarExperience } from './experiences/racecar/index.js';
+import { mountTerminalExperience } from './experiences/terminal/index.js';
+import { mountCommandCenterExperience } from './experiences/command-center/index.js';
 import { el } from './ui/dom.js';
 
-type ExperienceName = 'rocket' | 'racecar';
+type ExperienceName = 'rocket' | 'racecar' | 'terminal' | 'command-center';
 
 const EXPERIENCES: Record<ExperienceName, (root: HTMLElement, store: GameStore, client: GameClient) => () => void> = {
   rocket: mountRocketExperience,
   racecar: mountRacecarExperience,
+  terminal: mountTerminalExperience,
+  'command-center': mountCommandCenterExperience,
 };
+
+const EXPERIENCE_NAMES = Object.keys(EXPERIENCES) as ExperienceName[];
+
+const isExperienceName = (v: string | null): v is ExperienceName =>
+  v !== null && EXPERIENCE_NAMES.includes(v as ExperienceName);
 
 const params = new URLSearchParams(window.location.search);
 
 function resolveExperience(): ExperienceName {
   const fromUrl = params.get('experience');
-  if (fromUrl === 'rocket' || fromUrl === 'racecar') return fromUrl;
+  if (isExperienceName(fromUrl)) return fromUrl;
   const saved = localStorage.getItem('velocity.experience');
-  return saved === 'racecar' ? 'racecar' : 'rocket';
+  return isExperienceName(saved) ? saved : 'rocket';
 }
 
 function resolveUserId(): string {
@@ -80,11 +90,11 @@ function mountExperience(name: ExperienceName): void {
 const switcher = el(
   'div',
   { class: 'exp-switch' },
-  ...(['rocket', 'racecar'] as ExperienceName[]).map((name) => {
+  ...EXPERIENCE_NAMES.map((name) => {
     const btn = el(
       'button',
       { class: 'exp-switch-btn', type: 'button', onclick: () => mountExperience(name) },
-      name.toUpperCase(),
+      name === 'command-center' ? 'COMMAND CENTER' : name.toUpperCase(),
     );
     switchButtons.set(name, btn);
     return btn;

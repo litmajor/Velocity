@@ -18,6 +18,13 @@ description: How to run and black-box test the Velocity crash-game server (WS ga
 - WS non-admin clients only receive UI-tier events (STATE_SYNC, TICK_UPDATE, STATE_SNAPSHOT). To observe ROUND_CRASHED with the revealed serverSeed/proof over WS, first send `{action:"ADMIN", payload:{token:<WS_ADMIN_TOKEN>}}` — admins receive all EVENT_APPEND envelopes.
 - WS client scripts importing `ws` must live inside the repo (or set NODE_PATH) so ESM resolution finds node_modules.
 
+## Frontend (web/) UI testing
+- Run backend with `DATA_DIR=<fresh dir> MAX_ROUNDS=0 npx tsx src/vertical-slice.ts` (MAX_ROUNDS=0 = unbounded rounds; default dev cap is 10). Start it detached (`setsid nohup ... &`) or it dies with your shell.
+- Serve UI with `npm run web:dev` → http://localhost:8080. URL params: `?user=<id>` (dev auto-seeds 1000 credits on WALLET_SYNC), `?experience=rocket|racecar`, `?ws=<url>`, `?mock=1` (SIMULATED DATA badge).
+- Betting windows are short (~5s GRID/PRE-LAUNCH) and rounds fast (~10-30s); computer-use click latency often misses the window. Reliable trick: blind-click the Place Bet button every ~1s for 5-6 cycles (clicks on the disabled button are no-ops) and verify afterwards.
+- To prove the shared-engine mid-round switch: place a bet, then immediately click the other experience button in the same action batch — waiting a round-trip usually loses the round.
+- Known UI defect candidate: wallet Balance display can go stale after a cashout payout (PAYOUT tx appears but Balance is not updated until the next bet triggers a WALLET_BALANCE resync).
+
 ## Useful checks
 - Wallet ledger: `DATA_DIR/wallet.ledger`, one JSON line per tx with `tx` id (`bet:`, `payout:<betId>`, `refund:<betId>`, `ensure:`). Exactly-once = no duplicate payout:/refund: tx ids.
 - Settlement claims: `DATA_DIR/settlements/<roundId>.claim` (O_EXCL, never released).
