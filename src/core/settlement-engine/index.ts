@@ -5,6 +5,7 @@ import type { GameEngine }    from '../game-engine';
 import type { BettingService } from '../betting-service';
 import type { WalletEngine } from '../wallet-engine';
 import type { RoundRepository } from '../repositories/round-repository';
+import type { SettlementClaimStore } from '../repositories/settlement-claim';
 
 // ─── SettlementEngine ─────────────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ export class SettlementEngine {
     private bettingEngine: BettingService,
     private wallet?:       WalletEngine,
     private roundRepo?:    RoundRepository,
+    private claims?:       SettlementClaimStore,
   ) {}
 
   async settle(): Promise<{ winners: SettledBet[]; losers: SettledBet[] }> {
@@ -36,6 +38,13 @@ export class SettlementEngine {
         this.settledRounds.add(state.roundId);
         throw new Error(`settle: round ${state.roundId} already settled`);
       }
+    }
+    // Durable cross-process claim: at most one process may ever execute the
+    // economic effects of settling this round, even if the in-memory guard
+    // and the persisted-phase check above both raced.
+    if (this.claims && !this.claims.claim(state.roundId)) {
+      this.settledRounds.add(state.roundId);
+      throw new Error(`settle: round ${state.roundId} already claimed for settlement`);
     }
     this.settledRounds.add(state.roundId);
 
