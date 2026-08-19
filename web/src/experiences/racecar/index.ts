@@ -233,11 +233,14 @@ export function mountRacecarExperience(rootEl: HTMLElement, store: GameStore, cl
     if (round.phase === 'SETTLED' && results) {
       podium.classList.remove('hidden');
       const ranked = [...results.winners].sort((a, b) => b.payout - a.payout);
+      const hadEntrants = results.winners.length > 0 || results.losers.length > 0;
       podium.replaceChildren(
         el('div', { class: 'overlay-title' }, 'PODIUM'),
         el('div', { class: 'overlay-line' }, `Wreck at ${fmtMult(round.crashPoint ?? round.multiplier)}`),
-        el('div', { class: 'overlay-line' },
-          `${results.winners.length} finished \u00b7 ${results.losers.length} DNF \u00b7 purse ${fmtMoney(results.totalPayout)}`),
+        hadEntrants
+          ? el('div', { class: 'overlay-line' },
+              `${results.winners.length} finished \u00b7 ${results.losers.length} DNF \u00b7 purse ${fmtMoney(results.totalPayout)}`)
+          : el('div', { class: 'overlay-line' }, 'No entrants this race'),
         ...ranked.slice(0, 3).map((o, i) =>
           el('div', { class: 'overlay-row' }, `P${i + 1} ${o.userId} \u2014 ${fmtMoney(o.payout)}`)),
       );

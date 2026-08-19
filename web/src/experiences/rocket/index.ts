@@ -240,11 +240,14 @@ export function mountRocketExperience(rootEl: HTMLElement, store: GameStore, cli
     // debrief overlay from real settlement results
     if (round.phase === 'SETTLED' && results) {
       debrief.classList.remove('hidden');
+      const hadCrew = results.winners.length > 0 || results.losers.length > 0;
       debrief.replaceChildren(
         el('div', { class: 'overlay-title' }, 'MISSION DEBRIEF'),
         el('div', { class: 'overlay-line' }, `Anomaly at ${fmtMult(round.crashPoint ?? round.multiplier)}`),
-        el('div', { class: 'overlay-line' },
-          `${results.winners.length} crew ejected safely \u00b7 ${results.losers.length} lost \u00b7 payouts ${fmtMoney(results.totalPayout)}`),
+        hadCrew
+          ? el('div', { class: 'overlay-line' },
+              `${results.winners.length} crew ejected safely \u00b7 ${results.losers.length} lost \u00b7 payouts ${fmtMoney(results.totalPayout)}`)
+          : el('div', { class: 'overlay-line' }, 'Uncrewed mission \u2014 no participants this round'),
         ...results.winners.slice(0, 4).map((o) =>
           el('div', { class: 'overlay-row' }, `${o.userId} \u2014 ${fmtMoney(o.payout)}`)),
       );
