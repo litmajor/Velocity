@@ -44,8 +44,22 @@ const settlementEngine = new SettlementEngine(
   gameEngine, bettingService, wallet, roundRepo,
   new SettlementClaimStore(path.join(dataDir, 'settlements')),
 );
-const scheduler = new RoundScheduler(gameEngine, bettingService, settlementEngine, { maxRounds: 10 });
-const wsGateway = new WebSocketGateway(3001, gameEngine, bettingService);
+// MAX_ROUNDS: default 10 (dev harness); 0 or a negative value runs unbounded.
+const maxRoundsEnv = Number(process.env.MAX_ROUNDS ?? 10);
+const maxRounds = Number.isFinite(maxRoundsEnv) && maxRoundsEnv > 0 ? maxRoundsEnv : undefined;
+
+// Read-only wallet facade for the gateway. In dev, unknown web players are
+// auto-seeded with demo credits so the UI is playable; production requires
+// real account provisioning.
+const walletView = {
+  getBalance(userId: string): number {
+    if (process.env.NODE_ENV !== 'production') wallet.ensureAccount(userId, 1000);
+    return wallet.getBalance(userId);
+  },
+};
+
+const scheduler = new RoundScheduler(gameEngine, bettingService, settlementEngine, { maxRounds });
+const wsGateway = new WebSocketGateway(3001, gameEngine, bettingService, walletView);
 const debugSurface = new DebugSurface(gameEngine, bettingService, { mode: 'auto' });
 import { startAdminServer } from './runtime/admin-server';
 startAdminServer(Number(process.env.ADMIN_PORT ?? 4001), gameEngine, bettingService);
@@ -128,9 +142,9 @@ if (process.env.NODE_ENV !== 'production') {
 let roundsDone = 0;
 bus.on('ROUND_SETTLED', () => {
   roundsDone++;
-  if (roundsDone >= 10 && process.env.NODE_ENV !== 'production') {
+  if (maxRounds !== undefined && roundsDone >= maxRounds && process.env.NODE_ENV !== 'production') {
     setTimeout(() => {
-      console.log('\n[System] ✅ 10 rounds completed — simulation finished\n');
+      console.log(`\n[System] ✅ ${maxRounds} rounds completed — simulation finished\n`);
       void gracefulShutdown();
     }, 1_500);
   }

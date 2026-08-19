@@ -1,9 +1,9 @@
 // RecentRounds: history strip + table. Render-only.
 
-import type { GameView } from '../../../core/types.js';
-import { fmtMult, fmtTime } from '../../../core/format.js';
-import { el, badge, panel } from '../../../ui/dom.js';
-import type { PanelView } from './game-surface.js';
+import type { GameView } from '../../core/types.js';
+import { fmtMult, fmtTime } from '../../core/format.js';
+import { el, badge, panel } from '../../ui/dom.js';
+import type { PanelView } from '../panel-view.js';
 
 const bucket = (crash: number): string => (crash < 1.2 ? 'danger' : crash < 2 ? 'neutral' : 'success');
 

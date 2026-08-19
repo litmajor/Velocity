@@ -5,10 +5,10 @@
 // verifyRound(commitment, reveal) via a read-only endpoint or a browser
 // crypto build, then replace the stub handler below.
 
-import type { GameView } from '../../../core/types.js';
-import { fmtMult, shortHash } from '../../../core/format.js';
-import { el, button, panel } from '../../../ui/dom.js';
-import type { PanelView } from './game-surface.js';
+import type { GameView } from '../../core/types.js';
+import { fmtMult, shortHash } from '../../core/format.js';
+import { el, button, panel } from '../../ui/dom.js';
+import type { PanelView } from '../panel-view.js';
 
 export function createFairnessPanel(): PanelView {
   const rows: Array<[string, HTMLElement]> = [
