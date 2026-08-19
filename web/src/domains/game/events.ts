@@ -3,7 +3,7 @@
 // surfaces never see raw socket payloads. Names follow the backend's
 // GameEvents (src/domains/game/types.ts) DOMAIN_NOUN_VERB convention.
 
-import type { PlayerRow, RoundPhase } from '../../core/types.js';
+import type { PlayerRow, RoundPhase, SettledOutcome } from '../../core/types.js';
 
 export type ClientGameEvent =
   | {
@@ -27,7 +27,29 @@ export type ClientGameEvent =
       shapingParams: unknown;
       volatilitySnapshot: unknown;
     }
-  | { type: 'ROUND_SETTLED'; roundId: string }
+  | {
+      type: 'ROUND_SETTLED';
+      roundId: string;
+      winners?: SettledOutcome[];
+      losers?: SettledOutcome[];
+      totalBets?: number;
+      totalPayout?: number;
+    }
+  | {
+      // Authoritative snapshot on connect / mid-round join (STATE_SYNC/STATE_SNAPSHOT)
+      type: 'STATE_SYNCED';
+      roundId: string;
+      roundNumber: number;
+      phase: RoundPhase;
+      multiplier: number;
+      serverHash: string | null;
+      clientSeed: string | null;
+      nonce: number | null;
+      bettingEndsAt: number | null;
+    }
+  | { type: 'IDENTITY_SET'; userId: string }
+  | { type: 'PLAYER_BET_PLACED'; roundId: string; userId: string; stake: number }
+  | { type: 'PLAYER_CASHED_OUT'; roundId: string; userId: string; multiplier: number; payout: number }
   | { type: 'PLAYERS_UPDATED'; players: PlayerRow[] }
   | { type: 'WALLET_BALANCE_UPDATED'; balance: number }
   | {

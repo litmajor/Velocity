@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { VolatilityEngine, SystemState, VolatilitySnapshot } from '../volatility-engine';
 import { computeParamsCommit } from './verifier';
-import { saveJSON, loadJSON, ensureDataDir } from '../../runtime/persistence';
+import { saveJSONSync, loadJSONSync } from '../../runtime/persistence';
 
 export { canonicalJson, computeParamsCommit, recomputeCrashPoint, verifyRound } from './verifier';
 export type { FairnessCommitment, FairnessReveal, VerificationResult } from './verifier';
@@ -62,8 +62,9 @@ export class FairnessEngine {
   private readonly PERSIST_FILE = 'fairness.json';
 
   constructor() {
-    // fire-and-forget load of persisted state
-    void this.loadState();
+    // Synchronous load: usedCommits must be populated before any allocation
+    // can run, otherwise a commit reused across a restart would go undetected.
+    this.loadState();
   }
 
   generate(externalClientSeed?: string): FairnessResult {
@@ -103,11 +104,12 @@ export class FairnessEngine {
     this.chain.push(...newSecrets);
   }
 
-  // Persist/load important fairness state (used commits + player mix history)
-  private async saveState() {
+  // Persist/load important fairness state (used commits + player mix history).
+  // Synchronous and durable: allocateNextSeed must not return (and the commit
+  // must not be publishable) before the used commit is on disk.
+  private saveState() {
     try {
-      await ensureDataDir();
-      await saveJSON(this.PERSIST_FILE, {
+      saveJSONSync(this.PERSIST_FILE, {
         usedCommits: Array.from(this.usedCommits),
         playerMixHistory: this.playerMixHistory,
         chainLength: this.chain.length,
@@ -115,10 +117,9 @@ export class FairnessEngine {
     } catch (e) {}
   }
 
-  private async loadState() {
+  private loadState() {
     try {
-      await ensureDataDir();
-      const obj = await loadJSON<any>(this.PERSIST_FILE);
+      const obj = loadJSONSync<any>(this.PERSIST_FILE);
       if (!obj) return;
       if (Array.isArray(obj.usedCommits)) obj.usedCommits.forEach((c: string) => this.usedCommits.add(c));
       if (Array.isArray(obj.playerMixHistory)) this.playerMixHistory = obj.playerMixHistory;
@@ -128,7 +129,7 @@ export class FairnessEngine {
 
   // Public API to flush persisted fairness state (usedCommits, playerMixHistory)
   public async persistState() {
-    await this.saveState();
+    this.saveState();
   }
 
   // Ensure the chain has at least `min` unrevealed secrets available.
@@ -173,8 +174,9 @@ export class FairnessEngine {
     const paramsCommit = computeParamsCommit(shapingParams, snapshot, paramsSalt);
     this.allocated.set(roundId, { secret, salt, commit, index, proof, shapingParams, paramsSalt, paramsCommit });
     this.usedCommits.add(commit);
-    // persist used commits so seed reuse survives restarts
-    void this.saveState();
+    // durably persist used commits BEFORE the commit can be published:
+    // a restart (or crash mid-allocation) can then never re-issue this commit
+    this.saveState();
     return { serverSeed: secret, serverHash: commit, clientSeed, nonce, crashPoint, paramsCommit };
   }
 

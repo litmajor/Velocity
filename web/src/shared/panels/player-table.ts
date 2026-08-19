@@ -1,9 +1,9 @@
 // PlayerTable: live players for the current round. Render-only.
 
-import type { GameView } from '../../../core/types.js';
-import { fmtMoney, fmtMult } from '../../../core/format.js';
-import { el, badge, panel } from '../../../ui/dom.js';
-import type { PanelView } from './game-surface.js';
+import type { GameView } from '../../core/types.js';
+import { fmtMoney, fmtMult } from '../../core/format.js';
+import { el, badge, panel } from '../../ui/dom.js';
+import type { PanelView } from '../panel-view.js';
 
 const STATUS_VARIANT: Record<string, string> = {
   ACTIVE: 'running',
@@ -43,7 +43,7 @@ export function createPlayerTable(): PanelView {
         ...state.players.map((p) =>
           el(
             'tr',
-            { class: p.userId === 'you' ? 'row-you' : '' },
+            { class: p.userId === state.userId ? 'row-you' : '' },
             el('td', {}, p.userId),
             el('td', {}, fmtMoney(p.stake)),
             el(

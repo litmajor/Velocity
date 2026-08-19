@@ -62,6 +62,8 @@ The `proof` object contains intermediate values (`hex`, `modInt`, `r`, `baseCras
 
 - The `data/` directory stores persisted fairness state and tick ledgers. It is ignored by Git via `.gitignore`.
 - The dev simulation seeds a couple of demo players; use the admin server if you want to modify simulation parameters.
+- Exactly one server process may own a `DATA_DIR` at a time (enforced via `data/instance.lock`); see `docs/DEPLOYMENT.md` for the deployment invariant, admin security, and durability model.
+- Environment variables: `DATA_DIR` (persistence directory), `ADMIN_TOKEN` (required to enable the HTTP admin surface; disabled without it), `WS_ADMIN_TOKEN` (WebSocket admin grants), `WS_CLIENT_TOKEN` (optional WebSocket connection token).
 
 ## Next steps / Suggested improvements
 

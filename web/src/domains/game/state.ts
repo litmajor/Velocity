@@ -19,6 +19,40 @@ export function reduceGameView(state: GameView, ev: ClientGameEvent): GameView {
     case 'CONNECTION_CHANGED':
       return { ...state, connection: ev.status };
 
+    case 'IDENTITY_SET':
+      return { ...state, userId: ev.userId };
+
+    case 'STATE_SYNCED': {
+      // Authoritative resync (connect / mid-round join). Never clobber a round
+      // we are already tracking event-by-event.
+      if (ev.roundId === state.round.roundId) return state;
+      return {
+        ...state,
+        round: {
+          roundId: ev.roundId,
+          roundNumber: ev.roundNumber,
+          phase: ev.phase,
+          multiplier: ev.multiplier,
+          crashPoint: null,
+          bettingEndsAt: ev.bettingEndsAt,
+          curve: [ev.multiplier],
+        },
+        players: [],
+        fairness: {
+          ...state.fairness,
+          serverHash: ev.serverHash,
+          clientSeed: ev.clientSeed,
+          nonce: ev.nonce,
+          serverSeed: null,
+          volatilitySnapshot: null,
+          shapingParams: null,
+          proofCrashPoint: null,
+        },
+        myBet: { status: 'NONE', stake: 0, autoCashout: null, cashedOutMultiplier: null, payout: null },
+        results: null,
+      };
+    }
+
     case 'ROUND_STARTED':
       return {
         ...state,
@@ -43,6 +77,7 @@ export function reduceGameView(state: GameView, ev: ClientGameEvent): GameView {
           proofCrashPoint: null,
         },
         myBet: { status: 'NONE', stake: 0, autoCashout: null, cashedOutMultiplier: null, payout: null },
+        results: null,
         lastActionError: null,
       };
 
@@ -94,6 +129,44 @@ export function reduceGameView(state: GameView, ev: ClientGameEvent): GameView {
         ...state,
         round: { ...state.round, phase: 'SETTLED' },
         history: [entry, ...state.history].slice(0, HISTORY_LIMIT),
+        results: {
+          roundId: ev.roundId,
+          winners: ev.winners ?? [],
+          losers: ev.losers ?? [],
+          totalBets: ev.totalBets ?? 0,
+          totalPayout: ev.totalPayout ?? 0,
+        },
+      };
+    }
+
+    case 'PLAYER_BET_PLACED': {
+      if (ev.roundId !== state.round.roundId) return state;
+      const existing = state.players.find((p) => p.userId === ev.userId);
+      const row = {
+        userId: ev.userId,
+        stake: ev.stake,
+        autoCashout: null,
+        status: 'ACTIVE' as const,
+        cashedOutMultiplier: null,
+        payout: null,
+      };
+      return {
+        ...state,
+        players: existing
+          ? state.players.map((p) => (p.userId === ev.userId ? row : p))
+          : [...state.players, row],
+      };
+    }
+
+    case 'PLAYER_CASHED_OUT': {
+      if (ev.roundId !== state.round.roundId) return state;
+      return {
+        ...state,
+        players: state.players.map((p) =>
+          p.userId === ev.userId
+            ? { ...p, status: 'CASHED_OUT', cashedOutMultiplier: ev.multiplier, payout: ev.payout }
+            : p,
+        ),
       };
     }
 

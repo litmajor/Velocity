@@ -9,6 +9,8 @@ import { DebugSurface } from './surfaces/debug';
 import { WalletEngine } from './core/wallet-engine';
 import { FileBetRepository, FileRoundRepository } from './core/repositories';
 import { RecoveryEngine } from './core/recovery-engine';
+import { InstanceLock, InstanceLockError } from './runtime/instance-lock';
+import { SettlementClaimStore } from './core/repositories/settlement-claim';
 import type { BettingService } from './core/betting-service';
 import path from 'path';
 
@@ -16,6 +18,21 @@ import path from 'path';
 
 const bus = eventBus; // injectable bus for easier testing and isolation
 const dataDir = path.resolve(process.cwd(), process.env.DATA_DIR ?? 'data');
+
+// Single-writer deployment invariant: exactly one process may own a data
+// directory. All in-memory guards (settlement, wallet, seed chain, scheduler)
+// are only correct under this invariant, so it is enforced, not assumed.
+let instanceLock: InstanceLock;
+try {
+  instanceLock = InstanceLock.acquire(dataDir);
+} catch (err) {
+  if (err instanceof InstanceLockError) {
+    console.error(`[System] FATAL: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
+
 const roundRepo = new FileRoundRepository(path.join(dataDir, 'rounds'));
 const betRepo = new FileBetRepository(path.join(dataDir, 'bets'));
 const wallet = new WalletEngine({ ledgerPath: path.join(dataDir, 'wallet.ledger') });
@@ -23,9 +40,26 @@ const wallet = new WalletEngine({ ledgerPath: path.join(dataDir, 'wallet.ledger'
 const gameEngine = new GameEngine(bus, undefined, roundRepo);
 const bettingEngine = new BettingEngine(gameEngine, wallet, betRepo);
 const bettingService: BettingService = bettingEngine;
-const settlementEngine = new SettlementEngine(gameEngine, bettingService, wallet, roundRepo);
-const scheduler = new RoundScheduler(gameEngine, bettingService, settlementEngine, { maxRounds: 10 });
-const wsGateway = new WebSocketGateway(3001, gameEngine, bettingService);
+const settlementEngine = new SettlementEngine(
+  gameEngine, bettingService, wallet, roundRepo,
+  new SettlementClaimStore(path.join(dataDir, 'settlements')),
+);
+// MAX_ROUNDS: default 10 (dev harness); 0 or a negative value runs unbounded.
+const maxRoundsEnv = Number(process.env.MAX_ROUNDS ?? 10);
+const maxRounds = Number.isFinite(maxRoundsEnv) && maxRoundsEnv > 0 ? maxRoundsEnv : undefined;
+
+// Read-only wallet facade for the gateway. In dev, unknown web players are
+// auto-seeded with demo credits so the UI is playable; production requires
+// real account provisioning.
+const walletView = {
+  getBalance(userId: string): number {
+    if (process.env.NODE_ENV !== 'production') wallet.ensureAccount(userId, 1000);
+    return wallet.getBalance(userId);
+  },
+};
+
+const scheduler = new RoundScheduler(gameEngine, bettingService, settlementEngine, { maxRounds });
+const wsGateway = new WebSocketGateway(3001, gameEngine, bettingService, walletView);
 const debugSurface = new DebugSurface(gameEngine, bettingService, { mode: 'auto' });
 import { startAdminServer } from './runtime/admin-server';
 startAdminServer(Number(process.env.ADMIN_PORT ?? 4001), gameEngine, bettingService);
@@ -108,9 +142,9 @@ if (process.env.NODE_ENV !== 'production') {
 let roundsDone = 0;
 bus.on('ROUND_SETTLED', () => {
   roundsDone++;
-  if (roundsDone >= 10 && process.env.NODE_ENV !== 'production') {
+  if (maxRounds !== undefined && roundsDone >= maxRounds && process.env.NODE_ENV !== 'production') {
     setTimeout(() => {
-      console.log('\n[System] ✅ 10 rounds completed — simulation finished\n');
+      console.log(`\n[System] ✅ ${maxRounds} rounds completed — simulation finished\n`);
       void gracefulShutdown();
     }, 1_500);
   }
@@ -154,6 +188,7 @@ async function gracefulShutdown() {
   } catch (err) {
     console.error('[Shutdown error]', err);
   }
+  try { instanceLock.release(); } catch (e) {}
   process.exit(0);
 }
 

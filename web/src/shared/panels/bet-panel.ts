@@ -2,13 +2,13 @@
 // All validation verdicts come from /actions preflights; this surface only
 // renders them and forwards execution.
 
-import type { GameView } from '../../../core/types.js';
-import { fmtMoney, fmtMult } from '../../../core/format.js';
-import { el, button, panel } from '../../../ui/dom.js';
-import type { GameClient } from '../../../runtime/game-client.js';
-import { preflightPlaceBet, executePlaceBet } from '../../../actions/place-bet.js';
-import { preflightCashout, executeCashout } from '../../../actions/cashout.js';
-import type { PanelView } from './game-surface.js';
+import type { GameView } from '../../core/types.js';
+import { fmtMoney, fmtMult } from '../../core/format.js';
+import { el, button, panel } from '../../ui/dom.js';
+import type { GameClient } from '../../runtime/game-client.js';
+import { preflightPlaceBet, executePlaceBet } from '../../actions/place-bet.js';
+import { preflightCashout, executeCashout } from '../../actions/cashout.js';
+import type { PanelView } from '../panel-view.js';
 
 export function createBetPanel(client: GameClient, getState: () => GameView): PanelView {
   const stakeInput = el('input', { class: 'input', type: 'number', min: '0.01', step: '0.01', value: '10.00' });

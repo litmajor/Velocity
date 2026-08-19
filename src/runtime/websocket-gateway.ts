@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { eventBus } from './event-bus';
 import { EVENT_TIERS } from './event-tiers';
 import { ActionValidator } from './action-validator';
+import { timingSafeEqualStr } from './auth';
 import type { GameEvents, GameEventName } from '../domains/game';
 import type { GameEngine } from '../core/game-engine';
 import type { BettingService } from '../core/betting-service';
@@ -21,11 +22,29 @@ const FLUSH_INTERVAL_MS = 100; // flush cached multiplier snapshots
 // Only forward these authoritative messages to clients: snapshot, ticks, and event appends
 const DEFAULT_EVENTS: GameEventName[] = ['STATE_SNAPSHOT', 'TICK_UPDATE', 'EVENT_APPEND'] as GameEventName[];
 
+// Round-lifecycle and public-table envelopes safe for every player. Everything
+// in this set is already published information (the crash reveal is public by
+// design); all other envelopes stay admin-only.
+const PUBLIC_ENVELOPE_EVENTS = new Set([
+  'ROUND_STARTED',
+  'ROUND_LOCKED',
+  'ROUND_RUNNING',
+  'ROUND_CRASHED',
+  'ROUND_SETTLED',
+  'BET_PLACED',
+  'PLAYER_CASHED_OUT',
+]);
+
+export interface WalletReadView {
+  getBalance(userId: string): number;
+}
+
 export class WebSocketGateway {
   private wss: WebSocketServer;
   private clients = new Set<ClientMeta>();
   private inflightActions = new Set<string>();
   private seenRequestIds = new Set<string>();
+  private timers: Array<ReturnType<typeof setInterval>> = [];
   private readonly REQUEST_ID_TTL_MS = 5 * 60 * 1000; // 5 minutes
   private readonly PRUNE_INTERVAL_MS = 60 * 1000; // 1 minute
 
@@ -33,13 +52,14 @@ export class WebSocketGateway {
     private port: number,
     private gameEngine: GameEngine,
     private bettingEngine: BettingService,
+    private walletView?: WalletReadView,
   ) {
     this.wss = new WebSocketServer({ port });
     this.mirrorEvents();
     this.handleConnections();
     // periodically prune old requestIds to prevent unbounded memory growth
-    setInterval(() => this.pruneSeenRequestIds(), this.PRUNE_INTERVAL_MS);
-    setInterval(() => this.flushSnapshots(), FLUSH_INTERVAL_MS);
+    this.timers.push(setInterval(() => this.pruneSeenRequestIds(), this.PRUNE_INTERVAL_MS));
+    this.timers.push(setInterval(() => this.flushSnapshots(), FLUSH_INTERVAL_MS));
     console.log(`[WS] Gateway listening on ws://localhost:${port}`);
   }
 
@@ -63,6 +83,19 @@ export class WebSocketGateway {
       // Rooms filtering: if client subscribed to rooms, only send events for those roundIds
       const roundId = (data as any).roundId as string | undefined;
       if (client.rooms.size > 0 && roundId && !client.rooms.has(roundId)) continue;
+
+      // Public envelope allowlist: round lifecycle + public table events reach
+      // every player; all other envelopes remain admin-only.
+      if (event === 'EVENT_APPEND') {
+        // Auto-mirrored envelopes are {event, data, timestamp}; manual emits
+        // wrap the envelope as {envelope: {...}}.
+        const env = (data as any)?.envelope ?? data;
+        const inner = env?.event as string | undefined;
+        if (inner && PUBLIC_ENVELOPE_EVENTS.has(inner)) {
+          this.sendSafe(client, { type: event, data });
+        }
+        continue;
+      }
 
       // Tier filtering: for now UI tier is broadcast to all non-admin clients
       if (tier === 'UI') {
@@ -97,7 +130,7 @@ export class WebSocketGateway {
 
       // If a server-side client token is configured, enforce it at connect time
       const requiredToken = process.env.WS_CLIENT_TOKEN;
-      if (requiredToken && token !== requiredToken) {
+      if (requiredToken && !timingSafeEqualStr(token, requiredToken)) {
         try { ws.close?.(4001, 'Unauthorized'); } catch {}
         return;
       }
@@ -184,9 +217,10 @@ export class WebSocketGateway {
         break;
       }
       case 'ADMIN': {
-        // Simple admin toggle — in prod validate token
+        // Fails closed: no WS_ADMIN_TOKEN configured means admin can never be
+        // granted; comparison is constant-time and rejects empty tokens.
         const token = String(payload.token ?? '');
-        if (token && token === process.env.WS_ADMIN_TOKEN) {
+        if (timingSafeEqualStr(token, process.env.WS_ADMIN_TOKEN)) {
           client.isAdmin = true;
           this.sendSafe(client, { type: 'ADMIN_OK', data: {} });
         } else {
@@ -194,11 +228,21 @@ export class WebSocketGateway {
         }
         break;
       }
+      case 'WALLET_SYNC': {
+        const userId = String(payload.userId ?? '').trim();
+        if (!userId || !this.walletView) {
+          this.sendSafe(client, { type: 'ERROR', data: { message: 'wallet sync unavailable' } });
+          break;
+        }
+        this.sendWalletBalance(client, userId);
+        break;
+      }
       case 'PLACE_BET': {
         try {
           const { userId, amount } = ActionValidator.validatePlaceBet(payload);
           const bet = await this.bettingEngine.placeBet(userId, amount);
           this.sendSafe(client, { type: 'BET_ACCEPTED', data: bet });
+          this.sendWalletBalance(client, userId);
         } catch (err) {
           this.sendSafe(client, { type: 'BET_REJECTED', data: { reason: (err as Error).message } });
         }
@@ -219,6 +263,7 @@ export class WebSocketGateway {
             // server-only multiplier decision — user does not supply multiplier
             const bet = await this.bettingEngine.cashout(userId);
             this.sendSafe(client, { type: 'CASHOUT_ACCEPTED', data: bet });
+            this.sendWalletBalance(client, userId);
           } finally {
             this.inflightActions.delete(actionKey);
           }
@@ -229,6 +274,18 @@ export class WebSocketGateway {
       }
       default:
         this.sendSafe(client, { type: 'ERROR', data: { message: `Unknown action: ${action}` } });
+    }
+  }
+
+  private sendWalletBalance(client: ClientMeta, userId: string): void {
+    if (!this.walletView) return;
+    try {
+      this.sendSafe(client, {
+        type: 'WALLET_BALANCE',
+        data: { userId, balance: this.walletView.getBalance(userId) },
+      });
+    } catch {
+      // wallet lookups must never break the message loop
     }
   }
 
@@ -254,5 +311,19 @@ export class WebSocketGateway {
 
   get connectedClients(): number {
     return this.clients.size;
+  }
+
+  address() {
+    return this.wss.address();
+  }
+
+  close(): void {
+    for (const t of this.timers) clearInterval(t);
+    this.timers = [];
+    for (const client of this.clients) {
+      try { client.ws.close(); } catch {}
+    }
+    this.clients.clear();
+    this.wss.close();
   }
 }
